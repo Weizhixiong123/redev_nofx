@@ -106,25 +106,25 @@ type RecentOrder struct {
 
 // Context trading context (complete information passed to AI)
 type Context struct {
-	CurrentTime     string                             `json:"current_time"`
-	RuntimeMinutes  int                                `json:"runtime_minutes"`
-	CallCount       int                                `json:"call_count"`
-	Account         AccountInfo                        `json:"account"`
-	Positions       []PositionInfo                     `json:"positions"`
-	CandidateCoins  []CandidateCoin                    `json:"candidate_coins"`
-	PromptVariant   string                             `json:"prompt_variant,omitempty"`
-	TradingStats    *TradingStats                      `json:"trading_stats,omitempty"`
-	RecentOrders    []RecentOrder                      `json:"recent_orders,omitempty"`
-	MarketDataMap   map[string]*market.Data            `json:"-"`
-	MultiTFMarket   map[string]map[string]*market.Data `json:"-"`
-	OITopDataMap    map[string]*OITopData              `json:"-"`
-	QuantDataMap    map[string]*QuantData              `json:"-"`
-	OIRankingData      *nofxos.OIRankingData      `json:"-"` // Market-wide OI ranking data
-	NetFlowRankingData *nofxos.NetFlowRankingData `json:"-"` // Market-wide fund flow ranking data
-	PriceRankingData   *nofxos.PriceRankingData   `json:"-"` // Market-wide price gainers/losers
-	BTCETHLeverage     int                          `json:"-"`
-	AltcoinLeverage int                                `json:"-"`
-	Timeframes      []string                           `json:"-"`
+	CurrentTime        string                             `json:"current_time"`
+	RuntimeMinutes     int                                `json:"runtime_minutes"`
+	CallCount          int                                `json:"call_count"`
+	Account            AccountInfo                        `json:"account"`
+	Positions          []PositionInfo                     `json:"positions"`
+	CandidateCoins     []CandidateCoin                    `json:"candidate_coins"`
+	PromptVariant      string                             `json:"prompt_variant,omitempty"`
+	TradingStats       *TradingStats                      `json:"trading_stats,omitempty"`
+	RecentOrders       []RecentOrder                      `json:"recent_orders,omitempty"`
+	MarketDataMap      map[string]*market.Data            `json:"-"`
+	MultiTFMarket      map[string]map[string]*market.Data `json:"-"`
+	OITopDataMap       map[string]*OITopData              `json:"-"`
+	QuantDataMap       map[string]*QuantData              `json:"-"`
+	OIRankingData      *nofxos.OIRankingData              `json:"-"` // Market-wide OI ranking data
+	NetFlowRankingData *nofxos.NetFlowRankingData         `json:"-"` // Market-wide fund flow ranking data
+	PriceRankingData   *nofxos.PriceRankingData           `json:"-"` // Market-wide price gainers/losers
+	BTCETHLeverage     int                                `json:"-"`
+	AltcoinLeverage    int                                `json:"-"`
+	Timeframes         []string                           `json:"-"`
 }
 
 // Decision AI trading decision
@@ -985,6 +985,16 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString(fmt.Sprintf("- Example: With equity %.0f and BTC/ETH ratio %.1fx, max is %.0f USDT\n",
 		accountEquity, btcEthPosValueRatio, accountEquity*btcEthPosValueRatio))
 	sb.WriteString("- **DO NOT** just use available_balance as position_size_usd. Use the Position Value Limits!\n\n")
+
+	// Coin Source Signal Guidance (for mixed mode)
+	sb.WriteString("## Coin Source Signal Guidance\n")
+	sb.WriteString("When analyzing candidate coins, consider their source tags to determine trading direction:\n")
+	sb.WriteString("- **(AI500)** - High AI rating, strong momentum → Prioritize **LONG** (open_long)\n")
+	sb.WriteString("- **(OI_Top 持仓增加)** - Capital inflow, increasing open interest → Prioritize **LONG** (open_long)\n")
+	sb.WriteString("- **(OI_Low 持仓减少)** - Capital outflow, decreasing open interest → Prioritize **SHORT** (open_short)\n")
+	sb.WriteString("- **(AI500+OI_Top dual signal)** - Double bullish signal → Strongly favor **LONG**\n")
+	sb.WriteString("- **(AI500+OI_Low dual signal)** - Conflicting signal → Be cautious, use technical analysis carefully\n")
+	sb.WriteString("- **(static)** or **(Manual selection)** - No directional bias, use pure technical analysis\n\n")
 
 	// 4. Trading frequency (editable)
 	if promptSections.TradingFrequency != "" {
