@@ -9,6 +9,8 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/store"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -377,9 +379,9 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 	}
 
 	var req struct {
-		Config          store.StrategyConfig `json:"config" binding:"required"`
-		AccountEquity   float64              `json:"account_equity"`
-		PromptVariant   string               `json:"prompt_variant"`
+		Config        store.StrategyConfig `json:"config" binding:"required"`
+		AccountEquity float64              `json:"account_equity"`
+		PromptVariant string               `json:"prompt_variant"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -426,10 +428,11 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 	}
 
 	var req struct {
-		Config        store.StrategyConfig `json:"config" binding:"required"`
-		PromptVariant string               `json:"prompt_variant"`
-		AIModelID     string               `json:"ai_model_id"`
-		RunRealAI     bool                 `json:"run_real_ai"`
+		Config             store.StrategyConfig `json:"config" binding:"required"`
+		PromptVariant      string               `json:"prompt_variant"`
+		AIModelID          string               `json:"ai_model_id"`
+		SecondaryAIModelID string               `json:"secondary_ai_model_id"`
+		RunRealAI          bool                 `json:"run_real_ai"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -542,7 +545,7 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 
 	// If requesting real AI call
 	if req.RunRealAI && req.AIModelID != "" {
-		aiResponse, aiErr := s.runRealAITest(userID, req.AIModelID, systemPrompt, userPrompt)
+		aiResponse, aiErr := s.runRealAITest(userID, req.AIModelID, req.SecondaryAIModelID, systemPrompt, userPrompt)
 		if aiErr != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"system_prompt":   systemPrompt,
@@ -581,62 +584,111 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 	})
 }
 
-// runRealAITest Execute real AI test call
-func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string) (string, error) {
-	// Get AI model configuration
-	model, err := s.store.AIModel().Get(userID, modelID)
-	if err != nil {
-		return "", fmt.Errorf("failed to get AI model: %w", err)
+// runRealAITest Execute real AI test call (supports single or dual models)
+func (s *Server) runRealAITest(userID, modelID, secondaryModelID, systemPrompt, userPrompt string) (string, error) {
+	// Helper to run a single model
+	runOne := func(mID string) (string, string, error) {
+		// Get AI model configuration
+		model, err := s.store.AIModel().Get(userID, mID)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to get AI model: %w", err)
+		}
+
+		if !model.Enabled {
+			return model.Name, "", fmt.Errorf("AI model %s is not enabled", model.Name)
+		}
+
+		if model.APIKey == "" {
+			return model.Name, "", fmt.Errorf("AI model %s is missing API Key", model.Name)
+		}
+
+		// Create AI client
+		var aiClient mcp.AIClient
+		provider := model.Provider
+
+		// Convert EncryptedString to string for API key
+		apiKey := string(model.APIKey)
+		switch provider {
+		case "qwen":
+			aiClient = mcp.NewQwenClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		case "deepseek":
+			aiClient = mcp.NewDeepSeekClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		case "claude":
+			aiClient = mcp.NewClaudeClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		case "kimi":
+			aiClient = mcp.NewKimiClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		case "gemini":
+			aiClient = mcp.NewGeminiClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		case "grok":
+			aiClient = mcp.NewGrokClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		case "openai":
+			aiClient = mcp.NewOpenAIClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		default:
+			// Use generic client
+			aiClient = mcp.NewClient()
+			aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+		}
+
+		// Call AI API
+		response, err := aiClient.CallWithMessages(systemPrompt, userPrompt)
+		if err != nil {
+			return model.Name, "", fmt.Errorf("AI API call failed: %w", err)
+		}
+
+		return model.Name, response, nil
 	}
 
-	if !model.Enabled {
-		return "", fmt.Errorf("AI model %s is not enabled", model.Name)
+	// Single Model Mode
+	if secondaryModelID == "" {
+		_, resp, err := runOne(modelID)
+		return resp, err
 	}
 
-	if model.APIKey == "" {
-		return "", fmt.Errorf("AI model %s is missing API Key", model.Name)
+	// Dual Model Mode - Run concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var name1, resp1, name2, resp2 string
+	var err1, err2 error
+
+	go func() {
+		defer wg.Done()
+		name1, resp1, err1 = runOne(modelID)
+	}()
+
+	go func() {
+		defer wg.Done()
+		name2, resp2, err2 = runOne(secondaryModelID)
+	}()
+
+	wg.Wait()
+
+	// Format Combined Output
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🤖 Primary Model: %s\n", name1))
+	if err1 != nil {
+		sb.WriteString(fmt.Sprintf("❌ Error: %v\n", err1))
+	} else {
+		sb.WriteString("----------------------------------------\n")
+		sb.WriteString(resp1)
+		sb.WriteString("\n----------------------------------------\n")
 	}
 
-	// Create AI client
-	var aiClient mcp.AIClient
-	provider := model.Provider
-
-	// Convert EncryptedString to string for API key
-	apiKey := string(model.APIKey)
-	switch provider {
-	case "qwen":
-		aiClient = mcp.NewQwenClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
-	case "deepseek":
-		aiClient = mcp.NewDeepSeekClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
-	case "claude":
-		aiClient = mcp.NewClaudeClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
-	case "kimi":
-		aiClient = mcp.NewKimiClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
-	case "gemini":
-		aiClient = mcp.NewGeminiClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
-	case "grok":
-		aiClient = mcp.NewGrokClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
-	case "openai":
-		aiClient = mcp.NewOpenAIClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
-	default:
-		// Use generic client
-		aiClient = mcp.NewClient()
-		aiClient.SetAPIKey(apiKey, model.CustomAPIURL, model.CustomModelName)
+	sb.WriteString(fmt.Sprintf("\n🤖 Secondary Model: %s\n", name2))
+	if err2 != nil {
+		sb.WriteString(fmt.Sprintf("❌ Error: %v\n", err2))
+	} else {
+		sb.WriteString("----------------------------------------\n")
+		sb.WriteString(resp2)
+		sb.WriteString("\n----------------------------------------\n")
 	}
 
-	// Call AI API
-	response, err := aiClient.CallWithMessages(systemPrompt, userPrompt)
-	if err != nil {
-		return "", fmt.Errorf("AI API call failed: %w", err)
-	}
-
-	return response, nil
+	return sb.String(), nil
 }
-

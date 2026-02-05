@@ -23,6 +23,7 @@ type Trader struct {
 	UserID              string    `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
 	Name                string    `gorm:"column:name;not null" json:"name"`
 	AIModelID           string    `gorm:"column:ai_model_id;not null" json:"ai_model_id"`
+	SecondaryAIModelID  string    `gorm:"column:secondary_ai_model_id;default:''" json:"secondary_ai_model_id"`
 	ExchangeID          string    `gorm:"column:exchange_id;not null" json:"exchange_id"`
 	StrategyID          string    `gorm:"column:strategy_id;default:''" json:"strategy_id"`
 	InitialBalance      float64   `gorm:"column:initial_balance;not null" json:"initial_balance"`
@@ -110,12 +111,13 @@ func (s *TraderStore) Update(trader *Trader) error {
 		trader.ID, trader.Name, trader.AIModelID, trader.StrategyID)
 
 	updates := map[string]interface{}{
-		"name":           trader.Name,
-		"ai_model_id":    trader.AIModelID,
-		"exchange_id":    trader.ExchangeID,
-		"strategy_id":    trader.StrategyID,
-		"is_cross_margin": trader.IsCrossMargin,
-		"show_in_competition": trader.ShowInCompetition,
+		"name":                  trader.Name,
+		"ai_model_id":           trader.AIModelID,
+		"secondary_ai_model_id": trader.SecondaryAIModelID,
+		"exchange_id":           trader.ExchangeID,
+		"strategy_id":           trader.StrategyID,
+		"is_cross_margin":       trader.IsCrossMargin,
+		"show_in_competition":   trader.ShowInCompetition,
 	}
 
 	// Only update these if > 0

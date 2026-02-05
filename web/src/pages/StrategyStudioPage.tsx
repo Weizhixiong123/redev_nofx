@@ -57,6 +57,8 @@ export function StrategyStudioPage() {
   // AI Models for test run
   const [aiModels, setAiModels] = useState<AIModel[]>([])
   const [selectedModelId, setSelectedModelId] = useState<string>('')
+  const [secondaryModelId, setSecondaryModelId] = useState<string>('')
+  const [isDualModelTest, setIsDualModelTest] = useState(false)
 
   // Accordion states for left panel
   const [expandedSections, setExpandedSections] = useState({
@@ -467,6 +469,7 @@ export function StrategyStudioPage() {
           config: editingConfig,
           prompt_variant: selectedVariant,
           ai_model_id: selectedModelId,
+          secondary_ai_model_id: isDualModelTest ? secondaryModelId : undefined,
           run_real_ai: true,
         }),
       })
@@ -866,11 +869,10 @@ export function StrategyStudioPage() {
                         }
                       }}
                       disabled={selectedStrategy?.is_default}
-                      className={`p-3 rounded-lg border transition-all ${
-                        (!editingConfig.strategy_type || editingConfig.strategy_type === 'ai_trading')
-                          ? 'border-nofx-gold bg-nofx-gold/10'
-                          : 'border-nofx-border hover:border-nofx-gold/50'
-                      }`}
+                      className={`p-3 rounded-lg border transition-all ${(!editingConfig.strategy_type || editingConfig.strategy_type === 'ai_trading')
+                        ? 'border-nofx-gold bg-nofx-gold/10'
+                        : 'border-nofx-border hover:border-nofx-gold/50'
+                        }`}
                     >
                       <div className="flex items-center gap-2 mb-1">
                         <Bot className="w-4 h-4" style={{ color: '#F0B90B' }} />
@@ -889,11 +891,10 @@ export function StrategyStudioPage() {
                         }
                       }}
                       disabled={selectedStrategy?.is_default}
-                      className={`p-3 rounded-lg border transition-all ${
-                        editingConfig.strategy_type === 'grid_trading'
-                          ? 'border-nofx-gold bg-nofx-gold/10'
-                          : 'border-nofx-border hover:border-nofx-gold/50'
-                      }`}
+                      className={`p-3 rounded-lg border transition-all ${editingConfig.strategy_type === 'grid_trading'
+                        ? 'border-nofx-gold bg-nofx-gold/10'
+                        : 'border-nofx-border hover:border-nofx-gold/50'
+                        }`}
                     >
                       <div className="flex items-center gap-2 mb-1">
                         <Activity className="w-4 h-4" style={{ color: '#0ECB81' }} />
@@ -1044,22 +1045,60 @@ export function StrategyStudioPage() {
               <div className="p-3 space-y-3">
                 {/* Controls */}
                 <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Bot className="w-4 h-4 text-green-500" />
-                    <span className="text-xs font-medium text-nofx-text">{t('selectModel')}</span>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Bot className="w-4 h-4 text-green-500" />
+                      <span className="text-xs font-medium text-nofx-text">{t('selectModel')}</span>
+                    </div>
+                    <label className="flex items-center space-x-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={isDualModelTest}
+                        onChange={(e) => {
+                          const checked = e.target.checked
+                          setIsDualModelTest(checked)
+                          if (checked && !secondaryModelId && aiModels.length > 0) {
+                            const firstDiff = aiModels.find(m => m.id !== selectedModelId)
+                            setSecondaryModelId(firstDiff ? firstDiff.id : aiModels[0].id)
+                          }
+                        }}
+                        className="form-checkbox h-3 w-3 text-nofx-gold rounded border-nofx-gold/30 bg-nofx-bg focus:ring-0 focus:ring-offset-0"
+                      />
+                      <span className="text-[10px] text-nofx-gold">Dual Model</span>
+                    </label>
                   </div>
+
                   {aiModels.length > 0 ? (
-                    <select
-                      value={selectedModelId}
-                      onChange={(e) => setSelectedModelId(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg text-sm bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
-                    >
-                      {aiModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.name} ({model.provider})
-                        </option>
-                      ))}
-                    </select>
+                    <div className="space-y-2">
+                      <select
+                        value={selectedModelId}
+                        onChange={(e) => setSelectedModelId(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg text-sm bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
+                      >
+                        {aiModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name} ({model.provider})
+                          </option>
+                        ))}
+                      </select>
+
+                      {isDualModelTest && (
+                        <div className="pl-3 border-l-2 border-nofx-gold/20">
+                          <div className="text-[10px] text-nofx-text-muted mb-1">Secondary Model (Consensus)</div>
+                          <select
+                            value={secondaryModelId}
+                            onChange={(e) => setSecondaryModelId(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg text-sm bg-nofx-bg border border-nofx-gold/20 text-nofx-text"
+                          >
+                            {aiModels.map((model) => (
+                              <option key={model.id} value={model.id}>
+                                {model.name} ({model.provider})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
                   ) : (
                     <div className="px-3 py-2 rounded-lg text-sm bg-nofx-danger/10 text-nofx-danger">
                       {t('noModel')}

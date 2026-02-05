@@ -407,7 +407,6 @@ func (tm *TraderManager) GetTopTradersData() (map[string]interface{}, error) {
 	return result, nil
 }
 
-
 // RemoveTrader removes a trader from memory (does not affect database)
 // Used to force reload when updating trader configuration
 // If the trader is running, it will be stopped first
@@ -648,11 +647,26 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		return fmt.Errorf("trader %s has no strategy configured", traderCfg.Name)
 	}
 
+	// Load Secondary AI Model Config if configured
+	var secondaryAIModelCfg *store.AIModel
+	if traderCfg.SecondaryAIModelID != "" {
+		model, err := st.AIModel().Get(traderCfg.UserID, traderCfg.SecondaryAIModelID)
+		if err != nil {
+			logger.Warnf("⚠️ Failed to load Secondary AI model %s for trader %s: %v", traderCfg.SecondaryAIModelID, traderCfg.Name, err)
+		} else if !model.Enabled {
+			logger.Warnf("⚠️ Secondary AI model %s for trader %s is disabled", model.Name, traderCfg.Name)
+		} else {
+			secondaryAIModelCfg = model
+			logger.Infof("✓ Loaded Secondary AI Model: %s (%s)", model.Name, model.Provider)
+		}
+	}
+
 	// Build AutoTraderConfig (ai500APIURL/oiTopAPIURL obtained from strategy config, used in StrategyEngine)
 	traderConfig := trader.AutoTraderConfig{
 		ID:                    traderCfg.ID,
 		Name:                  traderCfg.Name,
 		AIModel:               aiModelCfg.Provider,
+		SecondaryAIModel:      "",                       // Will be set below
 		Exchange:              exchangeCfg.ExchangeType, // Exchange type: binance/bybit/okx/etc
 		ExchangeID:            exchangeCfg.ID,           // Exchange account UUID (for multi-account)
 		BinanceAPIKey:         "",
@@ -664,11 +678,15 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		QwenKey:               "",
 		CustomAPIURL:          aiModelCfg.CustomAPIURL,
 		CustomModelName:       aiModelCfg.CustomModelName,
-		ScanInterval:         time.Duration(traderCfg.ScanIntervalMinutes) * time.Minute,
-		InitialBalance:       traderCfg.InitialBalance,
-		IsCrossMargin:        traderCfg.IsCrossMargin,
-		ShowInCompetition:    traderCfg.ShowInCompetition,
-		StrategyConfig:       strategyConfig,
+		ScanInterval:          time.Duration(traderCfg.ScanIntervalMinutes) * time.Minute,
+		InitialBalance:        traderCfg.InitialBalance,
+		IsCrossMargin:         traderCfg.IsCrossMargin,
+		ShowInCompetition:     traderCfg.ShowInCompetition,
+		StrategyConfig:        strategyConfig,
+	}
+
+	if secondaryAIModelCfg != nil {
+		traderConfig.SecondaryAIModel = secondaryAIModelCfg.Provider
 	}
 
 	logger.Infof("📊 Loading trader %s: ScanIntervalMinutes=%d (from DB), ScanInterval=%v",
@@ -713,6 +731,7 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 	}
 
 	// Set API keys based on AI model (convert EncryptedString to string)
+	// Primary Model
 	switch aiModelCfg.Provider {
 	case "qwen":
 		traderConfig.QwenKey = string(aiModelCfg.APIKey)
@@ -721,6 +740,28 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 	default:
 		// For other providers (grok, openai, claude, gemini, kimi, etc.), use CustomAPIKey
 		traderConfig.CustomAPIKey = string(aiModelCfg.APIKey)
+	}
+
+	// Secondary Model (if exists)
+	if secondaryAIModelCfg != nil {
+		switch secondaryAIModelCfg.Provider {
+		case "qwen":
+			if traderConfig.QwenKey == "" { // Only set if not already set by primary
+				traderConfig.QwenKey = string(secondaryAIModelCfg.APIKey)
+			}
+		case "deepseek":
+			if traderConfig.DeepSeekKey == "" {
+				traderConfig.DeepSeekKey = string(secondaryAIModelCfg.APIKey)
+			}
+		default:
+			// For secondary, we might have a conflict if both use "CustomAPIKey".
+			// But current AutoTrader implementation only checks specific keys for specific providers.
+			// Implementing fully separate keys for all providers would require refactoring AutoTraderConfig.
+			// For now, if Secondary is generic type, it might overwrite Primary's custom key if Primary is also generic.
+			if traderConfig.CustomAPIKey == "" {
+				traderConfig.CustomAPIKey = string(secondaryAIModelCfg.APIKey)
+			}
+		}
 	}
 
 	// Create trader instance

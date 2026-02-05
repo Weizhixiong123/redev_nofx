@@ -13,6 +13,7 @@ import (
 	"nofx/store"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -249,11 +250,12 @@ func (e *StrategyEngine) GetConfig() *store.StrategyConfig {
 func GetFullDecision(ctx *Context, mcpClient mcp.AIClient) (*FullDecision, error) {
 	defaultConfig := store.GetDefaultStrategyConfig("en")
 	engine := NewStrategyEngine(&defaultConfig)
-	return GetFullDecisionWithStrategy(ctx, mcpClient, engine, "")
+	return GetFullDecisionWithStrategy(ctx, mcpClient, engine, "", nil)
 }
 
 // GetFullDecisionWithStrategy uses StrategyEngine to get AI decision (unified prompt generation)
-func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *StrategyEngine, variant string) (*FullDecision, error) {
+// supports optional secondaryClient for dual-model consensus
+func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *StrategyEngine, variant string, secondaryClient mcp.AIClient) (*FullDecision, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is nil")
 	}
@@ -292,17 +294,57 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 	// 3. Build User Prompt using strategy engine
 	userPrompt := engine.BuildUserPrompt(ctx)
 
-	// 4. Call AI API
+	// 4. Call AI API (Supports Parallel Execution for Dual Models)
 	aiCallStart := time.Now()
-	aiResponse, err := mcpClient.CallWithMessages(systemPrompt, userPrompt)
-	aiCallDuration := time.Since(aiCallStart)
-	if err != nil {
-		return nil, fmt.Errorf("AI API call failed: %w", err)
+
+	var rawResponsePrimary string
+	var rawResponseSecondary string
+	var errPrimary, errSecondary error
+
+	if secondaryClient != nil {
+		// --- Dual Model Mode ---
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Call Primary
+		go func() {
+			defer wg.Done()
+			rawResponsePrimary, errPrimary = mcpClient.CallWithMessages(systemPrompt, userPrompt)
+		}()
+
+		// Call Secondary
+		go func() {
+			defer wg.Done()
+			// We can use the same prompt for strictly comparable results
+			rawResponseSecondary, errSecondary = secondaryClient.CallWithMessages(systemPrompt, userPrompt)
+		}()
+
+		wg.Wait()
+
+		if errPrimary != nil {
+			return nil, fmt.Errorf("Primary AI call failed: %w", errPrimary)
+		}
+		// If secondary fails, log warning but proceed with primary only?
+		// For strict consensus, we should probably fail or fallback to primary with warning.
+		if errSecondary != nil {
+			logger.Warnf("Secondary AI call failed: %v. Falling back to single model.", errSecondary)
+			secondaryClient = nil // Disable consensus for this run
+		}
+
+	} else {
+		// --- Single Model Mode ---
+		rawResponsePrimary, errPrimary = mcpClient.CallWithMessages(systemPrompt, userPrompt)
+		if errPrimary != nil {
+			return nil, fmt.Errorf("AI API call failed: %w", errPrimary)
+		}
 	}
 
-	// 5. Parse AI response
+	aiCallDuration := time.Since(aiCallStart)
+
+	// 5. Parse AI response(s)
+	// Parse Primary
 	decision, err := parseFullDecisionResponse(
-		aiResponse,
+		rawResponsePrimary,
 		ctx.Account.TotalEquity,
 		riskConfig.BTCETHMaxLeverage,
 		riskConfig.AltcoinMaxLeverage,
@@ -310,14 +352,57 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 		riskConfig.AltcoinMaxPositionValueRatio,
 	)
 
+	// If parsing failed, nothing we can do
+	if err != nil {
+		return nil, err
+	}
+
+	// If Dual Mode active, Parse Secondary and Arbitrate
+	if secondaryClient != nil && rawResponseSecondary != "" {
+		decisionSecondary, errSec := parseFullDecisionResponse(
+			rawResponseSecondary,
+			ctx.Account.TotalEquity,
+			riskConfig.BTCETHMaxLeverage,
+			riskConfig.AltcoinMaxLeverage,
+			riskConfig.BTCETHMaxPositionValueRatio,
+			riskConfig.AltcoinMaxPositionValueRatio,
+		)
+
+		if errSec == nil && decisionSecondary != nil {
+			// Perform Arbitration
+			originalCount := len(decision.Decisions)
+			arbitratedDecisions, reasonLog := arbitrateDecisions(decision.Decisions, decisionSecondary.Decisions)
+
+			// Update decision object
+			decision.Decisions = arbitratedDecisions
+
+			// Append arbitration log to CoT or generic log
+			decision.CoTTrace += fmt.Sprintf("\n\n=== Dual AI Consensus Log ===\nPrimary Decisions: %d, Secondary Decisions: %d\nResulting Decisions: %d\n%s",
+				originalCount, len(decisionSecondary.Decisions), len(arbitratedDecisions), strings.Join(reasonLog, "\n"))
+
+			// Attach secondary response for debugging
+			decision.RawResponse += "\n\n--- SECONDARY RESPONSE ---\n" + rawResponseSecondary
+		} else {
+			logger.Warnf("Failed to parse Secondary AI response: %v. Using Primary only.", errSec)
+			decision.CoTTrace += fmt.Sprintf("\n\n[Warning] Secondary AI parsing failed: %v", errSec)
+		}
+	}
+
 	if decision != nil {
 		decision.Timestamp = time.Now()
 		decision.SystemPrompt = systemPrompt
 		decision.UserPrompt = userPrompt
 		decision.AIRequestDurationMs = aiCallDuration.Milliseconds()
-		decision.RawResponse = aiResponse
+		// If single mode, this is just primary response
+		if decision.RawResponse == "" {
+			decision.RawResponse = rawResponsePrimary
+		}
 	}
 
+	// The error 'err' here would be from the primary parsing.
+	// If primary parsing failed, we would have returned nil, err earlier.
+	// So, this final check is redundant if the earlier 'if err != nil { return nil, err }' is present.
+	// Keeping it as per the provided instruction, but noting potential redundancy.
 	if err != nil {
 		return decision, fmt.Errorf("failed to parse AI response: %w", err)
 	}
@@ -1411,6 +1496,10 @@ func (e *StrategyEngine) formatMarketData(data *market.Data) string {
 		sb.WriteString(fmt.Sprintf(", current_ema20 = %.3f", data.CurrentEMA20))
 	}
 
+	if indicators.EnableTEMA {
+		sb.WriteString(fmt.Sprintf(", current_tema = %.3f", data.CurrentTEMA))
+	}
+
 	if indicators.EnableMACD {
 		sb.WriteString(fmt.Sprintf(", current_macd = %.3f", data.CurrentMACD))
 	}
@@ -1537,6 +1626,10 @@ func (e *StrategyEngine) formatTimeframeSeriesData(sb *strings.Builder, data *ma
 		if len(data.EMA50Values) > 0 {
 			sb.WriteString(fmt.Sprintf("EMA50: %s\n", formatFloatSlice(data.EMA50Values)))
 		}
+	}
+
+	if indicators.EnableTEMA && len(data.TEMAValues) > 0 {
+		sb.WriteString(fmt.Sprintf("TEMA: %s\n", formatFloatSlice(data.TEMAValues)))
 	}
 
 	if indicators.EnableMACD && len(data.MACDValues) > 0 {
@@ -1982,4 +2075,86 @@ func detectLanguage(text string) Language {
 		}
 	}
 	return LangEnglish
+}
+
+// arbitrateDecisions merges decisions from two models using conservative consensus
+func arbitrateDecisions(primary []Decision, secondary []Decision) ([]Decision, []string) {
+	var finalDecisions []Decision
+	var logs []string
+
+	// Map secondary decisions for fast lookup
+	secMap := make(map[string]Decision)
+	for _, d := range secondary {
+		secMap[d.Symbol] = d
+	}
+
+	// Iterate primary decisions
+	for _, p := range primary {
+		s, exists := secMap[p.Symbol]
+
+		logPrefix := fmt.Sprintf("[%s]", p.Symbol)
+
+		if !exists {
+			// Only Primary has opinion
+			if isCloseAction(p.Action) {
+				// Safety: If Primary wants to CLOSE, we allow it even if Secondary is silent
+				// (Assuming Secondary thinks "Hold", and Close > Hold for risk)
+				logs = append(logs, fmt.Sprintf("%s Primary CLOSE vs Secondary HOLD -> ALLOW CLOSE", logPrefix))
+				finalDecisions = append(finalDecisions, p)
+			} else {
+				// Primary OPEN vs Secondary HOLD -> REJECT
+				logs = append(logs, fmt.Sprintf("%s Primary OPEN vs Secondary HOLD -> REJECT (No Consensus)", logPrefix))
+			}
+			continue
+		}
+
+		// Both have opinion
+		if p.Action == s.Action {
+			// Consensus Reached!
+			logs = append(logs, fmt.Sprintf("%s Consensus Reached: %s", logPrefix, p.Action))
+			// We use Primary's parameters (size, SL/TP) as "Main"
+			finalDecisions = append(finalDecisions, p)
+		} else {
+			// Disagreement
+			// Case 1: One wants to CLOSE, other wants to OPEN/HOLD -> Prioritize CLOSE (Safety)
+			if isCloseAction(p.Action) || isCloseAction(s.Action) {
+				// Construct a Close decision
+				closeDec := p
+				if isCloseAction(s.Action) {
+					closeDec = s
+				}
+				// Force action to be the close action
+				logs = append(logs, fmt.Sprintf("%s Conflict (One CLOSE) -> FORCE CLOSE", logPrefix))
+				finalDecisions = append(finalDecisions, closeDec)
+			} else {
+				// Case 2: One LONG, One SHORT -> REJECT
+				logs = append(logs, fmt.Sprintf("%s Conflict (%s vs %s) -> REJECT", logPrefix, p.Action, s.Action))
+			}
+		}
+	}
+
+	// Check if Secondary has CLOSE decisions that Primary missed
+	// (Safety: If Secondary screams "SELL!", we should listen even if Primary is asleep)
+	for _, s := range secondary {
+		if isCloseAction(s.Action) {
+			// Check if we already processed this symbol
+			found := false
+			for _, p := range primary {
+				if p.Symbol == s.Symbol {
+					found = true
+					break
+				}
+			}
+			if !found {
+				logs = append(logs, fmt.Sprintf("[%s] Secondary CLOSE vs Primary HOLD -> ALLOW CLOSE", s.Symbol))
+				finalDecisions = append(finalDecisions, s)
+			}
+		}
+	}
+
+	return finalDecisions, logs
+}
+
+func isCloseAction(action string) bool {
+	return action == "close_long" || action == "close_short"
 }

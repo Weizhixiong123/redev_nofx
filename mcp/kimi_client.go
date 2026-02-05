@@ -6,7 +6,7 @@ import (
 
 const (
 	ProviderKimi       = "kimi"
-	DefaultKimiBaseURL = "https://api.moonshot.ai/v1" // Global endpoint (use api.moonshot.cn for China)
+	DefaultKimiBaseURL = "https://api.moonshot.cn/v1" // Global endpoint (use api.moonshot.cn for China)
 	DefaultKimiModel   = "moonshot-v1-auto"
 )
 

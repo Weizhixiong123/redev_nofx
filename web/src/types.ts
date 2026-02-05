@@ -95,6 +95,7 @@ export interface TraderInfo {
   trader_id: string
   trader_name: string
   ai_model: string
+  secondary_ai_model?: string
   exchange_id?: string
   is_running?: boolean
   show_in_competition?: boolean
@@ -161,6 +162,7 @@ export interface CreateExchangeRequest {
 export interface CreateTraderRequest {
   name: string
   ai_model_id: string
+  secondary_ai_model_id?: string // Added for Dual AI
   exchange_id: string
   strategy_id?: string // 策略ID（新版，使用保存的策略配置）
   initial_balance?: number // 可选：创建时由后端自动获取，编辑时可手动更新
@@ -236,6 +238,7 @@ export interface TraderConfigData {
   trader_id?: string
   trader_name: string
   ai_model: string
+  secondary_ai_model_id?: string
   exchange_id: string
   strategy_id?: string  // 策略ID
   strategy_name?: string  // 策略名称
@@ -531,6 +534,7 @@ export interface IndicatorConfig {
   enable_raw_klines: boolean;
   // Technical indicators (optional)
   enable_ema: boolean;
+  enable_tema: boolean;
   enable_macd: boolean;
   enable_rsi: boolean;
   enable_atr: boolean;
@@ -539,6 +543,7 @@ export interface IndicatorConfig {
   enable_oi: boolean;
   enable_funding_rate: boolean;
   ema_periods?: number[];
+  tema_periods?: number[];
   rsi_periods?: number[];
   atr_periods?: number[];
   boll_periods?: number[];

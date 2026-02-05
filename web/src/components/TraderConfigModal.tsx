@@ -29,6 +29,7 @@ interface FormState {
   trader_id?: string
   trader_name: string
   ai_model: string
+  secondary_ai_model: string
   exchange_id: string
   strategy_id: string
   is_cross_margin: boolean
@@ -60,6 +61,7 @@ export function TraderConfigModal({
   const [formData, setFormData] = useState<FormState>({
     trader_name: '',
     ai_model: '',
+    secondary_ai_model: '',
     exchange_id: '',
     strategy_id: '',
     is_cross_margin: true,
@@ -70,6 +72,7 @@ export function TraderConfigModal({
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [isFetchingBalance, setIsFetchingBalance] = useState(false)
   const [balanceFetchError, setBalanceFetchError] = useState<string>('')
+  const [showDualModel, setShowDualModel] = useState(false)
 
   // 获取用户的策略列表
   useEffect(() => {
@@ -103,11 +106,16 @@ export function TraderConfigModal({
       setFormData({
         ...traderData,
         strategy_id: traderData.strategy_id || '',
+        secondary_ai_model: traderData.secondary_ai_model_id || '',
       })
+      if (traderData.secondary_ai_model_id) {
+        setShowDualModel(true)
+      }
     } else if (!isEditMode) {
       setFormData({
         trader_name: '',
         ai_model: availableModels[0]?.id || '',
+        secondary_ai_model: '',
         exchange_id: availableExchanges[0]?.id || '',
         strategy_id: '',
         is_cross_margin: true,
@@ -162,6 +170,7 @@ export function TraderConfigModal({
       const saveData: CreateTraderRequest = {
         name: formData.trader_name,
         ai_model_id: formData.ai_model,
+        secondary_ai_model_id: formData.secondary_ai_model || undefined,
         exchange_id: formData.exchange_id,
         strategy_id: formData.strategy_id,
         is_cross_margin: formData.is_cross_margin,
@@ -248,26 +257,84 @@ export function TraderConfigModal({
                   placeholder="请输入交易员名称"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-sm text-[#EAECEF] block mb-2">
-                    AI模型 <span className="text-red-500">*</span>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm text-[#EAECEF] font-medium">
+                    AI 模型配置
                   </label>
-                  <select
-                    value={formData.ai_model}
-                    onChange={(e) =>
-                      handleInputChange('ai_model', e.target.value)
-                    }
-                    className="w-full px-3 py-2 bg-[#0B0E11] border border-[#2B3139] rounded text-[#EAECEF] focus:border-[#F0B90B] focus:outline-none"
-                  >
-                    {availableModels.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {getShortName(model.name || model.id).toUpperCase()}
-                      </option>
-                    ))}
-                  </select>
+                  <label className="flex items-center space-x-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showDualModel}
+                      onChange={(e) => {
+                        const checked = e.target.checked
+                        setShowDualModel(checked)
+                        if (!checked) {
+                          handleInputChange('secondary_ai_model', '')
+                        } else {
+                          const firstDifferent = availableModels.find(m => m.id !== formData.ai_model)
+                          if (firstDifferent) {
+                            handleInputChange('secondary_ai_model', firstDifferent.id)
+                          } else if (availableModels.length > 0) {
+                            handleInputChange('secondary_ai_model', availableModels[0].id)
+                          }
+                        }
+                      }}
+                      className="form-checkbox h-4 w-4 text-[#F0B90B] rounded border-[#2B3139] bg-[#0B0E11] focus:ring-0 focus:ring-offset-0"
+                    />
+                    <span className="text-xs text-[#F0B90B]">启用双模型共识 (Dual-Model Consensus)</span>
+                  </label>
                 </div>
-                <div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className={showDualModel ? "col-span-2 md:col-span-1" : "col-span-2"}>
+                    <label className="text-sm text-[#EAECEF] block mb-2">
+                      主 AI模型 <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={formData.ai_model}
+                      onChange={(e) =>
+                        handleInputChange('ai_model', e.target.value)
+                      }
+                      className="w-full px-3 py-2 bg-[#0B0E11] border border-[#2B3139] rounded text-[#EAECEF] focus:border-[#F0B90B] focus:outline-none"
+                    >
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {getShortName(model.name || model.id).toUpperCase()}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {showDualModel && (
+                    <div className="col-span-2 md:col-span-1">
+                      <label className="text-sm text-[#EAECEF] block mb-2">
+                        副 AI模型 (共识校验) <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={formData.secondary_ai_model}
+                        onChange={(e) =>
+                          handleInputChange('secondary_ai_model', e.target.value)
+                        }
+                        className="w-full px-3 py-2 bg-[#0B0E11] border border-[#2B3139] rounded text-[#EAECEF] focus:border-[#F0B90B] focus:outline-none"
+                      >
+                        <option value="">-- 请选择 --</option>
+                        {availableModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {getShortName(model.name || model.id).toUpperCase()}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-[#848E9C] mt-1">
+                        需两个模型同时给出相同方向信号才开单
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2">
                   <label className="text-sm text-[#EAECEF] block mb-2">
                     交易所 <span className="text-red-500">*</span>
                   </label>
@@ -369,7 +436,7 @@ export function TraderConfigModal({
                     <div>
                       币种来源: {selectedStrategy.config.coin_source.source_type === 'static' ? '固定币种' :
                         selectedStrategy.config.coin_source.source_type === 'ai500' ? 'AI500' :
-                        selectedStrategy.config.coin_source.source_type === 'oi_top' ? 'OI Top' : '混合'}
+                          selectedStrategy.config.coin_source.source_type === 'oi_top' ? 'OI Top' : '混合'}
                     </div>
                     <div>
                       保证金上限: {((selectedStrategy.config.risk_control?.max_margin_usage || 0.9) * 100).toFixed(0)}%
@@ -395,11 +462,10 @@ export function TraderConfigModal({
                     <button
                       type="button"
                       onClick={() => handleInputChange('is_cross_margin', true)}
-                      className={`flex-1 px-3 py-2 rounded text-sm ${
-                        formData.is_cross_margin
-                          ? 'bg-[#F0B90B] text-black'
-                          : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
-                      }`}
+                      className={`flex-1 px-3 py-2 rounded text-sm ${formData.is_cross_margin
+                        ? 'bg-[#F0B90B] text-black'
+                        : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
+                        }`}
                     >
                       全仓
                     </button>
@@ -408,11 +474,10 @@ export function TraderConfigModal({
                       onClick={() =>
                         handleInputChange('is_cross_margin', false)
                       }
-                      className={`flex-1 px-3 py-2 rounded text-sm ${
-                        !formData.is_cross_margin
-                          ? 'bg-[#F0B90B] text-black'
-                          : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
-                      }`}
+                      className={`flex-1 px-3 py-2 rounded text-sm ${!formData.is_cross_margin
+                        ? 'bg-[#F0B90B] text-black'
+                        : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
+                        }`}
                     >
                       逐仓
                     </button>
@@ -452,22 +517,20 @@ export function TraderConfigModal({
                   <button
                     type="button"
                     onClick={() => handleInputChange('show_in_competition', true)}
-                    className={`flex-1 px-3 py-2 rounded text-sm ${
-                      formData.show_in_competition
-                        ? 'bg-[#F0B90B] text-black'
-                        : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
-                    }`}
+                    className={`flex-1 px-3 py-2 rounded text-sm ${formData.show_in_competition
+                      ? 'bg-[#F0B90B] text-black'
+                      : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
+                      }`}
                   >
                     显示
                   </button>
                   <button
                     type="button"
                     onClick={() => handleInputChange('show_in_competition', false)}
-                    className={`flex-1 px-3 py-2 rounded text-sm ${
-                      !formData.show_in_competition
-                        ? 'bg-[#F0B90B] text-black'
-                        : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
-                    }`}
+                    className={`flex-1 px-3 py-2 rounded text-sm ${!formData.show_in_competition
+                      ? 'bg-[#F0B90B] text-black'
+                      : 'bg-[#0B0E11] text-[#848E9C] border border-[#2B3139]'
+                      }`}
                   >
                     隐藏
                   </button>
@@ -568,6 +631,6 @@ export function TraderConfigModal({
           )}
         </div>
       </div>
-    </div>
+    </div >
   )
 }

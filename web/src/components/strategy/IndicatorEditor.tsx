@@ -64,6 +64,8 @@ export function IndicatorEditor({
       // Indicators
       ema: { zh: 'EMA 均线', en: 'EMA' },
       emaDesc: { zh: '指数移动平均线', en: 'Exponential Moving Average' },
+      tema: { zh: 'TEMA 均线', en: 'TEMA' },
+      temaDesc: { zh: '三重指数移动平均线', en: 'Triple Exponential Moving Average' },
       macd: { zh: 'MACD', en: 'MACD' },
       macdDesc: { zh: '异同移动平均线', en: 'Moving Average Convergence Divergence' },
       rsi: { zh: 'RSI', en: 'RSI' },
@@ -367,12 +369,14 @@ export function IndicatorEditor({
                   <input
                     type="checkbox"
                     checked={config.enable_oi_ranking || false}
-                    onChange={(e) => { e.stopPropagation(); !disabled && onChange({
-                      ...config,
-                      enable_oi_ranking: e.target.checked,
-                      ...(e.target.checked && !config.oi_ranking_duration ? { oi_ranking_duration: '1h' } : {}),
-                      ...(e.target.checked && !config.oi_ranking_limit ? { oi_ranking_limit: 10 } : {}),
-                    }) }}
+                    onChange={(e) => {
+                      e.stopPropagation(); !disabled && onChange({
+                        ...config,
+                        enable_oi_ranking: e.target.checked,
+                        ...(e.target.checked && !config.oi_ranking_duration ? { oi_ranking_duration: '1h' } : {}),
+                        ...(e.target.checked && !config.oi_ranking_limit ? { oi_ranking_limit: 10 } : {}),
+                      })
+                    }}
                     disabled={disabled}
                     className="w-3.5 h-3.5 rounded accent-green-500"
                   />
@@ -427,12 +431,14 @@ export function IndicatorEditor({
                   <input
                     type="checkbox"
                     checked={config.enable_netflow_ranking || false}
-                    onChange={(e) => { e.stopPropagation(); !disabled && onChange({
-                      ...config,
-                      enable_netflow_ranking: e.target.checked,
-                      ...(e.target.checked && !config.netflow_ranking_duration ? { netflow_ranking_duration: '1h' } : {}),
-                      ...(e.target.checked && !config.netflow_ranking_limit ? { netflow_ranking_limit: 10 } : {}),
-                    }) }}
+                    onChange={(e) => {
+                      e.stopPropagation(); !disabled && onChange({
+                        ...config,
+                        enable_netflow_ranking: e.target.checked,
+                        ...(e.target.checked && !config.netflow_ranking_duration ? { netflow_ranking_duration: '1h' } : {}),
+                        ...(e.target.checked && !config.netflow_ranking_limit ? { netflow_ranking_limit: 10 } : {}),
+                      })
+                    }}
                     disabled={disabled}
                     className="w-3.5 h-3.5 rounded accent-amber-500"
                   />
@@ -487,12 +493,14 @@ export function IndicatorEditor({
                   <input
                     type="checkbox"
                     checked={config.enable_price_ranking || false}
-                    onChange={(e) => { e.stopPropagation(); !disabled && onChange({
-                      ...config,
-                      enable_price_ranking: e.target.checked,
-                      ...(e.target.checked && !config.price_ranking_duration ? { price_ranking_duration: '1h,4h,24h' } : {}),
-                      ...(e.target.checked && !config.price_ranking_limit ? { price_ranking_limit: 10 } : {}),
-                    }) }}
+                    onChange={(e) => {
+                      e.stopPropagation(); !disabled && onChange({
+                        ...config,
+                        enable_price_ranking: e.target.checked,
+                        ...(e.target.checked && !config.price_ranking_duration ? { price_ranking_duration: '1h,4h,24h' } : {}),
+                        ...(e.target.checked && !config.price_ranking_limit ? { price_ranking_limit: 10 } : {}),
+                      })
+                    }}
                     disabled={disabled}
                     className="w-3.5 h-3.5 rounded accent-pink-500"
                   />
@@ -623,9 +631,8 @@ export function IndicatorEditor({
                             onClick={() => toggleTimeframe(tf.value)}
                             onDoubleClick={() => setPrimaryTimeframe(tf.value)}
                             disabled={disabled}
-                            className={`px-2 py-1 rounded text-xs font-medium transition-all ${
-                              isSelected ? '' : 'opacity-40 hover:opacity-70'
-                            }`}
+                            className={`px-2 py-1 rounded text-xs font-medium transition-all ${isSelected ? '' : 'opacity-40 hover:opacity-70'
+                              }`}
                             style={{
                               background: isSelected ? `${categoryColors[category]}15` : 'transparent',
                               border: `1px solid ${isSelected ? categoryColors[category] : '#2B3139'}`,
@@ -669,6 +676,7 @@ export function IndicatorEditor({
           <div className="grid grid-cols-2 gap-2">
             {[
               { key: 'enable_ema', label: 'ema', desc: 'emaDesc', color: '#F0B90B', periodKey: 'ema_periods', defaultPeriods: '20,50' },
+              { key: 'enable_tema', label: 'tema', desc: 'temaDesc', color: '#f97316', periodKey: 'tema_periods', defaultPeriods: '9' },
               { key: 'enable_macd', label: 'macd', desc: 'macdDesc', color: '#a855f7' },
               { key: 'enable_rsi', label: 'rsi', desc: 'rsiDesc', color: '#F6465D', periodKey: 'rsi_periods', defaultPeriods: '7,14' },
               { key: 'enable_atr', label: 'atr', desc: 'atrDesc', color: '#60a5fa', periodKey: 'atr_periods', defaultPeriods: '14' },

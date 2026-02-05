@@ -14,9 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"nofx/trader/types"
+
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/sonirico/go-hyperliquid"
-	"nofx/trader/types"
 )
 
 // HyperliquidTrader Hyperliquid trader
