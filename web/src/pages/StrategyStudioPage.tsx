@@ -1205,9 +1205,23 @@ export function StrategyStudioPage() {
                         {/* Raw AI Response */}
                         {aiTestResult.ai_response && (
                           <div>
-                            <div className="flex items-center gap-1.5 mb-1.5">
-                              <FileText className="w-3 h-3 text-nofx-text-muted" />
-                              <span className="text-xs font-medium text-nofx-text">{t('aiOutput')} (Raw)</span>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <FileText className="w-3 h-3 text-nofx-text-muted" />
+                                <span className="text-xs font-medium text-nofx-text">{t('aiOutput')} (Raw)</span>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  if (aiTestResult.ai_response) {
+                                    navigator.clipboard.writeText(aiTestResult.ai_response)
+                                    notify.success(language === 'zh' ? '已复制' : 'Copied')
+                                  }
+                                }}
+                                className="p-1 rounded hover:bg-white/10 text-nofx-text-muted hover:text-white transition-colors"
+                                title={language === 'zh' ? '复制' : 'Copy'}
+                              >
+                                <Copy className="w-3 h-3" />
+                              </button>
                             </div>
                             <pre
                               className="p-2 rounded-lg text-[10px] font-mono overflow-auto whitespace-pre-wrap bg-nofx-bg border border-nofx-gold/20 text-nofx-text"

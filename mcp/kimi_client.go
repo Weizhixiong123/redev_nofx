@@ -69,3 +69,16 @@ func (c *KimiClient) SetAPIKey(apiKey string, customURL string, customModel stri
 func (c *KimiClient) setAuthHeader(reqHeaders http.Header) {
 	c.Client.setAuthHeader(reqHeaders)
 }
+
+// buildMCPRequestBody overrides the default request body builder to fix temperature issue
+// Kimi's reasoning models (k1 series) typically require temperature=1.0
+func (c *KimiClient) buildMCPRequestBody(systemPrompt, userPrompt string) map[string]any {
+	// Call parent method first to get base body
+	body := c.Client.buildMCPRequestBody(systemPrompt, userPrompt)
+
+	// Force temperature to 1.0 for Kimi models to avoid "invalid temperature" error
+	// The error "only 1 is allowed for this model" indicates specific model constraint
+	body["temperature"] = 1.0
+
+	return body
+}
