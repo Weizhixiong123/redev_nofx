@@ -283,14 +283,19 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       return true
     }) || []
 
-  // 检查模型是否正在被运行中的交易员使用（用于UI禁用）
+  // 检查模型是否正在被运行中的交易员使用（用于UI禁用），包含主模型和辅助模型
   const isModelInUse = (modelId: string) => {
-    return traders?.some((t) => t.ai_model === modelId && t.is_running)
+    return traders?.some(
+      (t) => (t.ai_model === modelId || t.secondary_ai_model === modelId) && t.is_running
+    )
   }
 
-  // 检查模型被哪些交易员使用
+  // 检查模型被哪些交易员使用（包含主模型和辅助模型）
   const getModelUsageInfo = (modelId: string) => {
-    const usingTraders = traders?.filter((t) => t.ai_model === modelId) || []
+    const usingTraders =
+      traders?.filter(
+        (t) => t.ai_model === modelId || t.secondary_ai_model === modelId
+      ) || []
     const runningCount = usingTraders.filter((t) => t.is_running).length
     const totalCount = usingTraders.length
     return { runningCount, totalCount, usingTraders }
@@ -309,9 +314,13 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     return { runningCount, totalCount, usingTraders }
   }
 
-  // 检查模型是否被任何交易员使用（包括停止状态的）
+  // 检查模型是否被任何交易员使用（包括停止状态的，包含主模型和辅助模型）
   const isModelUsedByAnyTrader = (modelId: string) => {
-    return traders?.some((t) => t.ai_model === modelId) || false
+    return (
+      traders?.some(
+        (t) => t.ai_model === modelId || t.secondary_ai_model === modelId
+      ) || false
+    )
   }
 
   // 检查交易所是否被任何交易员使用（包括停止状态的）
@@ -319,9 +328,13 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     return traders?.some((t) => t.exchange_id === exchangeId) || false
   }
 
-  // 获取使用特定模型的交易员列表
+  // 获取使用特定模型的交易员列表（包含主模型和辅助模型）
   const getTradersUsingModel = (modelId: string) => {
-    return traders?.filter((t) => t.ai_model === modelId) || []
+    return (
+      traders?.filter(
+        (t) => t.ai_model === modelId || t.secondary_ai_model === modelId
+      ) || []
+    )
   }
 
   // 获取使用特定交易所的交易员列表
@@ -1096,18 +1109,52 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       >
                         {trader.trader_name}
                       </div>
-                      <div
-                        className="text-xs md:text-sm truncate"
-                        style={{
-                          color: trader.ai_model.includes('deepseek')
-                            ? '#60a5fa'
-                            : '#c084fc',
-                        }}
-                      >
-                        {getModelDisplayName(
-                          trader.ai_model.split('_').pop() || trader.ai_model
-                        )}{' '}
-                        Model • {getExchangeDisplayName(trader.exchange_id, allExchanges)}
+                      <div className="flex flex-col gap-0.5">
+                        {/* 主模型 */}
+                        <div
+                          className="text-xs md:text-sm truncate flex items-center gap-1"
+                          style={{
+                            color: trader.ai_model.includes('deepseek')
+                              ? '#60a5fa'
+                              : trader.ai_model.includes('kimi') || trader.ai_model.includes('moonshot')
+                                ? '#c084fc'
+                                : trader.ai_model.includes('claude')
+                                  ? '#f59e0b'
+                                  : trader.ai_model.includes('openai') || trader.ai_model.includes('gpt')
+                                    ? '#34d399'
+                                    : '#c084fc',
+                          }}
+                        >
+                          <span className="text-[10px] opacity-60 font-mono">主</span>
+                          {getModelDisplayName(
+                            trader.ai_model.split('_').pop() || trader.ai_model
+                          )}{' '}
+                          Model • {getExchangeDisplayName(trader.exchange_id, allExchanges)}
+                        </div>
+                        {/* 辅助模型（仅在配置了副模型时显示） */}
+                        {trader.secondary_ai_model && (
+                          <div
+                            className="text-xs truncate flex items-center gap-1"
+                            style={{
+                              color: trader.secondary_ai_model.includes('deepseek')
+                                ? '#60a5fa'
+                                : trader.secondary_ai_model.includes('kimi') || trader.secondary_ai_model.includes('moonshot')
+                                  ? '#c084fc'
+                                  : trader.secondary_ai_model.includes('claude')
+                                    ? '#f59e0b'
+                                    : trader.secondary_ai_model.includes('openai') || trader.secondary_ai_model.includes('gpt')
+                                      ? '#34d399'
+                                      : '#a78bfa',
+                              opacity: 0.85,
+                            }}
+                          >
+                            <span className="text-[10px] opacity-60 font-mono">审</span>
+                            {getModelDisplayName(
+                              trader.secondary_ai_model.split('_').pop() || trader.secondary_ai_model
+                            )}{' '}
+                            Model
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
