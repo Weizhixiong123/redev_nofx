@@ -13,7 +13,6 @@ import (
 	"nofx/store"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -294,55 +293,20 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 	// 3. Build User Prompt using strategy engine
 	userPrompt := engine.BuildUserPrompt(ctx)
 
-	// 4. Call AI API (Supports Parallel Execution for Dual Models)
+	// 4. Call Primary AI
 	aiCallStart := time.Now()
 
 	var rawResponsePrimary string
-	var rawResponseSecondary string
-	var errPrimary, errSecondary error
+	var errPrimary error
 
-	if secondaryClient != nil {
-		// --- Dual Model Mode ---
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		// Call Primary
-		go func() {
-			defer wg.Done()
-			rawResponsePrimary, errPrimary = mcpClient.CallWithMessages(systemPrompt, userPrompt)
-		}()
-
-		// Call Secondary
-		go func() {
-			defer wg.Done()
-			// We can use the same prompt for strictly comparable results
-			rawResponseSecondary, errSecondary = secondaryClient.CallWithMessages(systemPrompt, userPrompt)
-		}()
-
-		wg.Wait()
-
-		if errPrimary != nil {
-			return nil, fmt.Errorf("Primary AI call failed: %w", errPrimary)
-		}
-		// If secondary fails, log warning but proceed with primary only?
-		// For strict consensus, we should probably fail or fallback to primary with warning.
-		if errSecondary != nil {
-			logger.Warnf("Secondary AI call failed: %v. Falling back to single model.", errSecondary)
-			secondaryClient = nil // Disable consensus for this run
-		}
-
-	} else {
-		// --- Single Model Mode ---
-		rawResponsePrimary, errPrimary = mcpClient.CallWithMessages(systemPrompt, userPrompt)
-		if errPrimary != nil {
-			return nil, fmt.Errorf("AI API call failed: %w", errPrimary)
-		}
+	rawResponsePrimary, errPrimary = mcpClient.CallWithMessages(systemPrompt, userPrompt)
+	if errPrimary != nil {
+		return nil, fmt.Errorf("AI API call failed: %w", errPrimary)
 	}
 
 	aiCallDuration := time.Since(aiCallStart)
 
-	// 5. Parse AI response(s)
-	// Parse Primary
+	// 5. Parse Primary AI response
 	decision, err := parseFullDecisionResponse(
 		rawResponsePrimary,
 		ctx.Account.TotalEquity,
@@ -352,39 +316,52 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 		riskConfig.AltcoinMaxPositionValueRatio,
 	)
 
-	// If parsing failed, nothing we can do
 	if err != nil {
 		return nil, err
 	}
 
-	// If Dual Mode active, Parse Secondary and Arbitrate
-	if secondaryClient != nil && rawResponseSecondary != "" {
-		decisionSecondary, errSec := parseFullDecisionResponse(
-			rawResponseSecondary,
-			ctx.Account.TotalEquity,
-			riskConfig.BTCETHMaxLeverage,
-			riskConfig.AltcoinMaxLeverage,
-			riskConfig.BTCETHMaxPositionValueRatio,
-			riskConfig.AltcoinMaxPositionValueRatio,
-		)
+	// 6. If Secondary AI configured, use it to REVIEW primary's opening decisions
+	if secondaryClient != nil && decision != nil && len(decision.Decisions) > 0 {
+		// Separate close decisions (always allowed) from open decisions (need review)
+		var closeDecisions []Decision
+		var openDecisions []Decision
+		for _, d := range decision.Decisions {
+			if isCloseAction(d.Action) {
+				closeDecisions = append(closeDecisions, d)
+			} else if d.Action != "hold" && d.Action != "wait" {
+				openDecisions = append(openDecisions, d)
+			}
+		}
 
-		if errSec == nil && decisionSecondary != nil {
-			// Perform Arbitration
-			originalCount := len(decision.Decisions)
-			arbitratedDecisions, reasonLog := arbitrateDecisions(decision.Decisions, decisionSecondary.Decisions)
+		if len(openDecisions) > 0 {
+			// Build review prompt for secondary AI
+			reviewPrompt := buildReviewPrompt(openDecisions, ctx)
+			reviewSystemPrompt := buildReviewSystemPrompt()
 
-			// Update decision object
-			decision.Decisions = arbitratedDecisions
+			logger.Infof("🔍 Sending %d opening decisions to Secondary AI for review...", len(openDecisions))
+			reviewStart := time.Now()
+			rawReviewResponse, errReview := secondaryClient.CallWithMessages(reviewSystemPrompt, reviewPrompt)
+			reviewDuration := time.Since(reviewStart)
+			aiCallDuration += reviewDuration
 
-			// Append arbitration log to CoT or generic log
-			decision.CoTTrace += fmt.Sprintf("\n\n=== Dual AI Consensus Log ===\nPrimary Decisions: %d, Secondary Decisions: %d\nResulting Decisions: %d\n%s",
-				originalCount, len(decisionSecondary.Decisions), len(arbitratedDecisions), strings.Join(reasonLog, "\n"))
+			if errReview != nil {
+				logger.Warnf("Secondary AI review failed: %v. Using Primary decisions only.", errReview)
+				decision.CoTTrace += fmt.Sprintf("\n\n[Warning] Secondary AI review call failed: %v. All primary decisions kept.", errReview)
+			} else {
+				// Parse review results and filter decisions
+				approvedDecisions, reviewLog := parseReviewResponse(rawReviewResponse, openDecisions)
 
-			// Attach secondary response for debugging
-			decision.RawResponse += "\n\n--- SECONDARY RESPONSE ---\n" + rawResponseSecondary
+				// Final decisions = close decisions (always) + approved open decisions
+				decision.Decisions = append(closeDecisions, approvedDecisions...)
+
+				decision.CoTTrace += fmt.Sprintf("\n\n=== Secondary AI Review Log ===\nOpen decisions submitted for review: %d\nApproved: %d, Rejected: %d\nClose decisions (auto-approved): %d\n%s",
+					len(openDecisions), len(approvedDecisions), len(openDecisions)-len(approvedDecisions), len(closeDecisions), strings.Join(reviewLog, "\n"))
+
+				decision.RawResponse += "\n\n--- SECONDARY REVIEW RESPONSE ---\n" + rawReviewResponse
+			}
 		} else {
-			logger.Warnf("Failed to parse Secondary AI response: %v. Using Primary only.", errSec)
-			decision.CoTTrace += fmt.Sprintf("\n\n[Warning] Secondary AI parsing failed: %v", errSec)
+			logger.Infof("🔍 No opening decisions to review, skipping Secondary AI call")
+			decision.CoTTrace += "\n\n[Info] No opening decisions from Primary AI, Secondary review skipped."
 		}
 	}
 
@@ -2078,81 +2055,207 @@ func detectLanguage(text string) Language {
 }
 
 // arbitrateDecisions merges decisions from two models using conservative consensus
-func arbitrateDecisions(primary []Decision, secondary []Decision) ([]Decision, []string) {
-	var finalDecisions []Decision
-	var logs []string
+// buildReviewSystemPrompt builds a system prompt for the secondary AI acting as a trade reviewer
+func buildReviewSystemPrompt() string {
+	return `你是一位专业的加密货币交易风控审查官。你的职责是审查主AI提出的交易建议，判断每笔交易是否合理。
 
-	// Map secondary decisions for fast lookup
-	secMap := make(map[string]Decision)
-	for _, d := range secondary {
-		secMap[d.Symbol] = d
+你的审查标准：
+1. 方向是否与当前市场趋势一致
+2. 入场时机是否合理（是否在关键支撑/阻力位附近）
+3. 杠杆倍数是否过高（考虑币种波动性）
+4. 止损止盈比例是否合理（风险回报比是否 >= 1.5）
+5. 仓位大小是否合理（不应超过总资金的合理比例）
+
+请对每笔交易回复以下JSON格式：
+{
+  "reviews": [
+    {
+      "symbol": "BTCUSDT",
+      "verdict": "APPROVE",
+      "reason": "方向与趋势一致，风险回报比合理"
+    },
+    {
+      "symbol": "ETHUSDT", 
+      "verdict": "REJECT",
+      "reason": "当前处于强阻力位，逆势开多风险过大"
+    }
+  ]
+}
+
+重要规则：
+- verdict 只能是 "APPROVE" 或 "REJECT"
+- 每个symbol必须给出明确判定
+- 如果你无法判断，倾向于 APPROVE（信任主AI的分析）
+- 只审查开仓交易，平仓交易已自动通过无需审查
+- 回复必须包含有效的JSON`
+}
+
+// buildReviewPrompt builds a user prompt for the secondary AI to review primary's decisions
+func buildReviewPrompt(openDecisions []Decision, ctx *Context) string {
+	var sb strings.Builder
+
+	sb.WriteString("## 主AI交易建议审查请求\n\n")
+
+	// Account context
+	sb.WriteString(fmt.Sprintf("### 账户状态\n- 总权益: %.2f USDT\n", ctx.Account.TotalEquity))
+	sb.WriteString(fmt.Sprintf("- 可用余额: %.2f USDT\n", ctx.Account.AvailableBalance))
+	if len(ctx.Positions) > 0 {
+		sb.WriteString(fmt.Sprintf("- 当前持仓数: %d\n", len(ctx.Positions)))
+		for _, pos := range ctx.Positions {
+			sb.WriteString(fmt.Sprintf("  - %s %s 杠杆%dx 未实现盈亏: %.2f USDT\n",
+				pos.Symbol, pos.Side, pos.Leverage, pos.UnrealizedPnL))
+		}
+	}
+	sb.WriteString("\n")
+
+	// Decisions to review
+	sb.WriteString("### 待审查的开仓建议\n\n")
+	for i, d := range openDecisions {
+		actionCN := d.Action
+		switch d.Action {
+		case "open_long":
+			actionCN = "开多"
+		case "open_short":
+			actionCN = "开空"
+		}
+
+		sb.WriteString(fmt.Sprintf("**交易 %d: %s %s**\n", i+1, d.Symbol, actionCN))
+		if d.Leverage > 0 {
+			sb.WriteString(fmt.Sprintf("- 杠杆: %dx\n", d.Leverage))
+		}
+		if d.PositionSizeUSD > 0 {
+			sb.WriteString(fmt.Sprintf("- 仓位: %.2f USDT\n", d.PositionSizeUSD))
+		}
+		if d.StopLoss > 0 {
+			sb.WriteString(fmt.Sprintf("- 止损: %.4f\n", d.StopLoss))
+		}
+		if d.TakeProfit > 0 {
+			sb.WriteString(fmt.Sprintf("- 止盈: %.4f\n", d.TakeProfit))
+		}
+		if d.Confidence > 0 {
+			sb.WriteString(fmt.Sprintf("- 主AI信心: %d%%\n", d.Confidence))
+		}
+		if d.Reasoning != "" {
+			sb.WriteString(fmt.Sprintf("- 主AI理由: %s\n", d.Reasoning))
+		}
+
+		// Add market data context for this symbol if available
+		if ctx.MarketDataMap != nil {
+			if mData, ok := ctx.MarketDataMap[d.Symbol]; ok && mData != nil {
+				sb.WriteString(fmt.Sprintf("- 当前价格: %.4f\n", mData.CurrentPrice))
+				if mData.PriceChange1h != 0 {
+					sb.WriteString(fmt.Sprintf("- 1h涨跌幅: %.2f%%\n", mData.PriceChange1h))
+				}
+				if mData.PriceChange4h != 0 {
+					sb.WriteString(fmt.Sprintf("- 4h涨跌幅: %.2f%%\n", mData.PriceChange4h))
+				}
+			}
+		}
+		sb.WriteString("\n")
 	}
 
-	// Iterate primary decisions
-	for _, p := range primary {
-		s, exists := secMap[p.Symbol]
+	sb.WriteString("请逐一审查以上交易建议，给出 APPROVE 或 REJECT 判定。\n")
+	return sb.String()
+}
 
-		logPrefix := fmt.Sprintf("[%s]", p.Symbol)
+// parseReviewResponse parses the secondary AI's review response and returns approved decisions
+func parseReviewResponse(rawResponse string, openDecisions []Decision) ([]Decision, []string) {
+	var approved []Decision
+	var logs []string
 
-		if !exists {
-			// Only Primary has opinion
-			if isCloseAction(p.Action) {
-				// Safety: If Primary wants to CLOSE, we allow it even if Secondary is silent
-				// (Assuming Secondary thinks "Hold", and Close > Hold for risk)
-				logs = append(logs, fmt.Sprintf("%s Primary CLOSE vs Secondary HOLD -> ALLOW CLOSE", logPrefix))
-				finalDecisions = append(finalDecisions, p)
+	// Try to extract JSON from response
+	type ReviewItem struct {
+		Symbol  string `json:"symbol"`
+		Verdict string `json:"verdict"`
+		Reason  string `json:"reason"`
+	}
+	type ReviewResponse struct {
+		Reviews []ReviewItem `json:"reviews"`
+	}
+
+	var reviewResp ReviewResponse
+
+	// Try to find JSON in the response
+	jsonStr := rawResponse
+	if startIdx := strings.Index(rawResponse, "{"); startIdx >= 0 {
+		if endIdx := strings.LastIndex(rawResponse, "}"); endIdx >= startIdx {
+			jsonStr = rawResponse[startIdx : endIdx+1]
+		}
+	}
+
+	err := json.Unmarshal([]byte(jsonStr), &reviewResp)
+	if err != nil {
+		// If JSON parsing fails, try a more lenient approach
+		logger.Warnf("Failed to parse review JSON: %v. Trying lenient parsing...", err)
+
+		// Lenient parsing: look for APPROVE/REJECT per symbol
+		responseLower := strings.ToUpper(rawResponse)
+		for _, d := range openDecisions {
+			symbolUpper := strings.ToUpper(d.Symbol)
+			// Find the section mentioning this symbol
+			symbolIdx := strings.Index(responseLower, symbolUpper)
+			if symbolIdx >= 0 {
+				// Look for APPROVE or REJECT near this symbol mention
+				searchRange := responseLower[symbolIdx:]
+				if len(searchRange) > 500 {
+					searchRange = searchRange[:500]
+				}
+
+				if strings.Contains(searchRange, "REJECT") {
+					logs = append(logs, fmt.Sprintf("[%s] ❌ REJECTED by reviewer (lenient parse)", d.Symbol))
+				} else if strings.Contains(searchRange, "APPROVE") {
+					logs = append(logs, fmt.Sprintf("[%s] ✅ APPROVED by reviewer (lenient parse)", d.Symbol))
+					approved = append(approved, d)
+				} else {
+					// Can't determine, default to approve (trust primary)
+					logs = append(logs, fmt.Sprintf("[%s] ⚠️ Review unclear, defaulting to APPROVE", d.Symbol))
+					approved = append(approved, d)
+				}
 			} else {
-				// Primary OPEN vs Secondary HOLD -> REJECT
-				logs = append(logs, fmt.Sprintf("%s Primary OPEN vs Secondary HOLD -> REJECT (No Consensus)", logPrefix))
+				// Symbol not mentioned in review, default to approve
+				logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not mentioned in review, defaulting to APPROVE", d.Symbol))
+				approved = append(approved, d)
 			}
+		}
+		return approved, logs
+	}
+
+	// Build a map from review results
+	reviewMap := make(map[string]ReviewItem)
+	for _, r := range reviewResp.Reviews {
+		// Normalize symbol (handle both "BTC" and "BTCUSDT")
+		sym := strings.ToUpper(r.Symbol)
+		reviewMap[sym] = r
+	}
+
+	// Match reviews to decisions
+	for _, d := range openDecisions {
+		symUpper := strings.ToUpper(d.Symbol)
+		review, found := reviewMap[symUpper]
+
+		// Also try without USDT suffix
+		if !found {
+			shortSym := strings.TrimSuffix(symUpper, "USDT")
+			review, found = reviewMap[shortSym]
+		}
+
+		if !found {
+			// Not reviewed, default to approve (trust primary)
+			logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not in review response, defaulting to APPROVE", d.Symbol))
+			approved = append(approved, d)
 			continue
 		}
 
-		// Both have opinion
-		if p.Action == s.Action {
-			// Consensus Reached!
-			logs = append(logs, fmt.Sprintf("%s Consensus Reached: %s", logPrefix, p.Action))
-			// We use Primary's parameters (size, SL/TP) as "Main"
-			finalDecisions = append(finalDecisions, p)
+		verdict := strings.ToUpper(strings.TrimSpace(review.Verdict))
+		if verdict == "APPROVE" {
+			logs = append(logs, fmt.Sprintf("[%s] ✅ APPROVED: %s", d.Symbol, review.Reason))
+			approved = append(approved, d)
 		} else {
-			// Disagreement
-			// Case 1: One wants to CLOSE, other wants to OPEN/HOLD -> Prioritize CLOSE (Safety)
-			if isCloseAction(p.Action) || isCloseAction(s.Action) {
-				// Construct a Close decision
-				closeDec := p
-				if isCloseAction(s.Action) {
-					closeDec = s
-				}
-				// Force action to be the close action
-				logs = append(logs, fmt.Sprintf("%s Conflict (One CLOSE) -> FORCE CLOSE", logPrefix))
-				finalDecisions = append(finalDecisions, closeDec)
-			} else {
-				// Case 2: One LONG, One SHORT -> REJECT
-				logs = append(logs, fmt.Sprintf("%s Conflict (%s vs %s) -> REJECT", logPrefix, p.Action, s.Action))
-			}
+			logs = append(logs, fmt.Sprintf("[%s] ❌ REJECTED: %s", d.Symbol, review.Reason))
 		}
 	}
 
-	// Check if Secondary has CLOSE decisions that Primary missed
-	// (Safety: If Secondary screams "SELL!", we should listen even if Primary is asleep)
-	for _, s := range secondary {
-		if isCloseAction(s.Action) {
-			// Check if we already processed this symbol
-			found := false
-			for _, p := range primary {
-				if p.Symbol == s.Symbol {
-					found = true
-					break
-				}
-			}
-			if !found {
-				logs = append(logs, fmt.Sprintf("[%s] Secondary CLOSE vs Primary HOLD -> ALLOW CLOSE", s.Symbol))
-				finalDecisions = append(finalDecisions, s)
-			}
-		}
-	}
-
-	return finalDecisions, logs
+	return approved, logs
 }
 
 func isCloseAction(action string) bool {

@@ -832,6 +832,7 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		UserID:               userID,
 		Name:                 req.Name,
 		AIModelID:            req.AIModelID,
+		SecondaryAIModelID:   req.SecondaryAIModelID,
 		ExchangeID:           req.ExchangeID,
 		StrategyID:           strategyID, // Associated strategy ID
 		InitialBalance:       req.InitialBalance,
@@ -2149,22 +2150,23 @@ func (s *Server) handleGetTraderConfig(c *gin.Context) {
 	aiModelID := traderConfig.AIModelID
 
 	result := map[string]interface{}{
-		"trader_id":             traderConfig.ID,
-		"trader_name":           traderConfig.Name,
-		"ai_model":              aiModelID,
-		"exchange_id":           traderConfig.ExchangeID,
-		"strategy_id":           traderConfig.StrategyID,
-		"initial_balance":       traderConfig.InitialBalance,
-		"scan_interval_minutes": traderConfig.ScanIntervalMinutes,
-		"btc_eth_leverage":      traderConfig.BTCETHLeverage,
-		"altcoin_leverage":      traderConfig.AltcoinLeverage,
-		"trading_symbols":       traderConfig.TradingSymbols,
-		"custom_prompt":         traderConfig.CustomPrompt,
-		"override_base_prompt":  traderConfig.OverrideBasePrompt,
-		"is_cross_margin":       traderConfig.IsCrossMargin,
-		"use_ai500":             traderConfig.UseAI500,
-		"use_oi_top":            traderConfig.UseOITop,
-		"is_running":            isRunning,
+		"trader_id":              traderConfig.ID,
+		"trader_name":            traderConfig.Name,
+		"ai_model":               aiModelID,
+		"secondary_ai_model_id":  traderConfig.SecondaryAIModelID,
+		"exchange_id":            traderConfig.ExchangeID,
+		"strategy_id":            traderConfig.StrategyID,
+		"initial_balance":        traderConfig.InitialBalance,
+		"scan_interval_minutes":  traderConfig.ScanIntervalMinutes,
+		"btc_eth_leverage":       traderConfig.BTCETHLeverage,
+		"altcoin_leverage":       traderConfig.AltcoinLeverage,
+		"trading_symbols":        traderConfig.TradingSymbols,
+		"custom_prompt":          traderConfig.CustomPrompt,
+		"override_base_prompt":   traderConfig.OverrideBasePrompt,
+		"is_cross_margin":        traderConfig.IsCrossMargin,
+		"use_ai500":              traderConfig.UseAI500,
+		"use_oi_top":             traderConfig.UseOITop,
+		"is_running":             isRunning,
 	}
 
 	c.JSON(http.StatusOK, result)

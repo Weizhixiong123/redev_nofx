@@ -390,6 +390,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       const request = {
         name: data.name,
         ai_model_id: data.ai_model_id,
+        secondary_ai_model_id: data.secondary_ai_model_id || undefined,
         exchange_id: data.exchange_id,
         strategy_id: data.strategy_id,
         initial_balance: data.initial_balance,
