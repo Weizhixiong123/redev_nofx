@@ -265,6 +265,16 @@ func formatCurrentPositionsZH(ctx *Context) string {
 	return sb.String()
 }
 
+// containsSource checks if a source is in the sources list
+func containsSource(sources []string, target string) bool {
+	for _, s := range sources {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
 // formatCandidateCoinsZH 格式化候选币种（中文）
 func formatCandidateCoinsZH(ctx *Context) string {
 	var sb strings.Builder
@@ -272,6 +282,15 @@ func formatCandidateCoinsZH(ctx *Context) string {
 
 	for i, coin := range ctx.CandidateCoins {
 		sb.WriteString(fmt.Sprintf("### %d. %s\n\n", i+1, coin.Symbol))
+
+		// 来源信号标注：帮助AI判断方向
+		if containsSource(coin.Sources, "oi_low") {
+			sb.WriteString("📉 **信号来源**: OI持仓减少榜 — 资金流出、持仓撤退信号，**优先考虑做空(open_short)**\n\n")
+		} else if containsSource(coin.Sources, "oi_top") {
+			sb.WriteString("📈 **信号来源**: OI持仓增加榜 — 资金流入、新仓建立信号，**优先考虑做多(open_long)**\n\n")
+		} else if containsSource(coin.Sources, "ai500") {
+			sb.WriteString("🤖 **信号来源**: AI500智能评分榜 — 综合评分较高，根据技术分析判断方向\n\n")
+		}
 
 		// 当前价格
 		if ctx.MarketDataMap != nil {
@@ -354,7 +373,6 @@ func formatKlineDataZH(symbol string, tfData map[string]*market.TimeframeSeriesD
 
 	return sb.String()
 }
-
 
 // getOIInterpretationZH 获取OI变化解读（中文）
 func getOIInterpretationZH(oiChange, priceChange string) string {
@@ -539,6 +557,15 @@ func formatCandidateCoinsEN(ctx *Context) string {
 	for i, coin := range ctx.CandidateCoins {
 		sb.WriteString(fmt.Sprintf("### %d. %s\n\n", i+1, coin.Symbol))
 
+		// Source signal annotation: help AI determine direction
+		if containsSource(coin.Sources, "oi_low") {
+			sb.WriteString("📉 **Signal Source**: OI Decrease Ranking — Capital outflow, position exit signal. **Prioritize SHORT (open_short)**\n\n")
+		} else if containsSource(coin.Sources, "oi_top") {
+			sb.WriteString("📈 **Signal Source**: OI Increase Ranking — Capital inflow, new position signal. **Prioritize LONG (open_long)**\n\n")
+		} else if containsSource(coin.Sources, "ai500") {
+			sb.WriteString("🤖 **Signal Source**: AI500 Smart Ranking — High composite score. Determine direction from technical analysis\n\n")
+		}
+
 		if ctx.MarketDataMap != nil {
 			if mdata, ok := ctx.MarketDataMap[coin.Symbol]; ok {
 				sb.WriteString(fmt.Sprintf("Current Price: %.4f\n\n", mdata.CurrentPrice))
@@ -619,7 +646,6 @@ func formatKlineDataEN(symbol string, tfData map[string]*market.TimeframeSeriesD
 
 	return sb.String()
 }
-
 
 // getOIInterpretationEN 获取OI变化解读（英文）
 func getOIInterpretationEN(oiChange, priceChange string) string {
