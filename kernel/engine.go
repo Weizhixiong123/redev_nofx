@@ -1035,26 +1035,44 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("## AI GUIDED (Recommended, you should follow):\n")
 	sb.WriteString(fmt.Sprintf("- Trading Leverage: Altcoins max %dx | BTC/ETH max %dx\n",
 		riskControl.AltcoinMaxLeverage, riskControl.BTCETHMaxLeverage))
-	sb.WriteString(fmt.Sprintf("- Risk-Reward Ratio: ≥1:%.1f (take_profit / stop_loss)\n", riskControl.MinRiskRewardRatio))
+	sb.WriteString(fmt.Sprintf("- Risk-Reward Ratio: ≥1:%.1f\n", riskControl.MinRiskRewardRatio))
+	sb.WriteString("  **Risk = potential LOSS, Reward = potential PROFIT**\n")
+	sb.WriteString("  - LONG:  Reward = |take_profit - entry| / |entry - stop_loss| = Risk-Reward Ratio\n")
+	sb.WriteString("  - SHORT: Reward = |entry - take_profit| / |stop_loss - entry| = Risk-Reward Ratio\n")
+	sb.WriteString("  - Example LONG: entry=100, SL=95, TP=115 → Reward/Risk = 15/5 = 3.0 ✅\n")
+	sb.WriteString("  - Example BAD:  entry=100, SL=80, TP=102 → Reward/Risk = 2/20 = 0.1 ❌\n")
 	sb.WriteString(fmt.Sprintf("- Min Confidence: ≥%d to open position\n\n", riskControl.MinConfidence))
 
 	// Position sizing guidance
 	sb.WriteString("## Position Sizing Guidance\n")
+	sb.WriteString("**IMPORTANT: `position_size_usd` = Notional Value (名义价值), NOT margin!**\n")
+	sb.WriteString("- `position_size_usd` is the total notional value of the position in USDT\n")
+	sb.WriteString("- Actual margin (collateral) = position_size_usd / leverage\n")
+	sb.WriteString("- Quantity = position_size_usd / current_price\n")
+	sb.WriteString("- Risk = position_size_usd × stop_loss_percentage\n\n")
 	sb.WriteString("Calculate `position_size_usd` based on your confidence and the Position Value Limits above:\n")
 	sb.WriteString("- High confidence (≥85): Use 80-100%% of max position value limit\n")
 	sb.WriteString("- Medium confidence (70-84): Use 50-80%% of max position value limit\n")
 	sb.WriteString("- Low confidence (60-69): Use 30-50%% of max position value limit\n")
-	sb.WriteString(fmt.Sprintf("- Example: With equity %.0f and BTC/ETH ratio %.1fx, max is %.0f USDT\n",
-		accountEquity, btcEthPosValueRatio, accountEquity*btcEthPosValueRatio))
+	sb.WriteString(fmt.Sprintf("- Example: With equity %.0f and Altcoin ratio %.1fx, max notional = %.0f USDT\n",
+		accountEquity, altcoinPosValueRatio, accountEquity*altcoinPosValueRatio))
+	sb.WriteString(fmt.Sprintf("  → If confidence=80, position_size_usd = %.0f × 0.7 = %.0f USDT (notional)\n",
+		accountEquity*altcoinPosValueRatio, accountEquity*altcoinPosValueRatio*0.7))
+	sb.WriteString(fmt.Sprintf("  → With 3x leverage: margin = %.0f / 3 = %.0f USDT (actual collateral)\n",
+		accountEquity*altcoinPosValueRatio*0.7, accountEquity*altcoinPosValueRatio*0.7/3))
+	sb.WriteString("- **DO NOT** multiply position_size_usd by leverage — it is ALREADY the notional value!\n")
 	sb.WriteString("- **DO NOT** just use available_balance as position_size_usd. Use the Position Value Limits!\n\n")
 
 	// Coin Source Signal Guidance (for mixed mode)
 	sb.WriteString("## Coin Source Signal Guidance\n")
 	sb.WriteString("When analyzing candidate coins, consider their source tags to determine trading direction:\n")
-	sb.WriteString("- **(AI500)** - High AI rating, strong momentum → Prioritize **LONG** (open_long)\n")
+	sb.WriteString("- **(AI500)** - High AI rating, active coin → Analyze technicals to decide **LONG or SHORT**\n")
+	sb.WriteString("  - If trend is UP + RSI not overbought → open_long\n")
+	sb.WriteString("  - If trend is DOWN + RSI not oversold → open_short\n")
+	sb.WriteString("  - If overbought (RSI>80) after sharp rally → consider open_short\n")
 	sb.WriteString("- **(OI_Top 持仓增加)** - Capital inflow, increasing open interest → Prioritize **LONG** (open_long)\n")
 	sb.WriteString("- **(OI_Low 持仓减少)** - Capital outflow, decreasing open interest → Prioritize **SHORT** (open_short)\n")
-	sb.WriteString("- **(AI500+OI_Top dual signal)** - Double bullish signal → Strongly favor **LONG**\n")
+	sb.WriteString("- **(AI500+OI_Top dual signal)** - High score + capital inflow → Strongly favor **LONG**\n")
 	sb.WriteString("- **(AI500+OI_Low dual signal)** - Conflicting signal → Be cautious, use technical analysis carefully\n")
 	sb.WriteString("- **(static)** or **(Manual selection)** - No directional bias, use pure technical analysis\n\n")
 
@@ -2059,12 +2077,25 @@ func detectLanguage(text string) Language {
 func buildReviewSystemPrompt() string {
 	return `你是一位专业的加密货币交易风控审查官。你的职责是审查主AI提出的交易建议，判断每笔交易是否合理。
 
+重要概念：
+- "仓位"（position_size_usd）= 名义价值（notional value），不是保证金
+- 实际保证金 = 仓位 / 杠杆
+- 例如：仓位32 USDT + 3x杠杆 → 实际保证金 = 32/3 = 10.67 USDT
+- 评估仓位风险时，请用"保证金/总权益"来判断，而非"名义价值/总权益"
+
 你的审查标准：
 1. 方向是否与当前市场趋势一致
 2. 入场时机是否合理（是否在关键支撑/阻力位附近）
 3. 杠杆倍数是否过高（考虑币种波动性）
-4. 止损止盈比例是否合理（风险回报比是否 >= 1.5）
-5. 仓位大小是否合理（不应超过总资金的合理比例）
+4. 风险回报比是否合理（≥ 1.5）
+   - 做多: 风报比 = |止盈 - 入场价| / |入场价 - 止损|（回报/风险，必须 ≥ 1.5）
+   - 做空: 风报比 = |入场价 - 止盈| / |止损 - 入场价|
+   - 例: 入场100, 止损95, 止盈115 → 风报比 = 15/5 = 3.0 ✅
+5. 保证金占比（保证金 = 仓位/杠杆，保证金/总权益）
+   - ≤30%: 安全，不应视为问题
+   - 30%-50%: 需关注，但不应仅因此否决
+   - >50%: 过高，应否决
+6. 追高/追低风险（1h涨跌>10% 或 4h涨跌>30% 时应否决）
 
 请对每笔交易回复以下JSON格式：
 {
@@ -2072,7 +2103,7 @@ func buildReviewSystemPrompt() string {
     {
       "symbol": "BTCUSDT",
       "verdict": "APPROVE",
-      "reason": "方向与趋势一致，风险回报比合理"
+      "reason": "方向与趋势一致，风险回报比合理，保证金占比23%合理"
     },
     {
       "symbol": "ETHUSDT", 

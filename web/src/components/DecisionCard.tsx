@@ -221,6 +221,38 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
   const [showSystemPrompt, setShowSystemPrompt] = useState(false)
   const [showInputPrompt, setShowInputPrompt] = useState(false)
   const [showCoT, setShowCoT] = useState(false)
+  const [showSecondaryCoT, setShowSecondaryCoT] = useState(false)
+
+  // 分割主模型和副模型的思维链内容
+  const splitCoTTrace = (cotTrace: string) => {
+    if (!cotTrace) return { primary: '', secondary: '' }
+
+    // 后端分隔符
+    const separator = '=== Secondary AI Review Log ==='
+    const warnPrefix = '\n\n[Warning] Secondary AI review call failed:'
+    const infoPrefix = '\n\n[Info] No opening decisions from Primary AI'
+
+    let primary = cotTrace
+    let secondary = ''
+
+    if (cotTrace.includes(separator)) {
+      const parts = cotTrace.split(separator)
+      primary = parts[0].trim()
+      secondary = parts.slice(1).join(separator).trim()
+    } else if (cotTrace.includes(warnPrefix)) {
+      const idx = cotTrace.indexOf(warnPrefix)
+      primary = cotTrace.substring(0, idx).trim()
+      secondary = cotTrace.substring(idx).trim()
+    } else if (cotTrace.includes(infoPrefix)) {
+      const idx = cotTrace.indexOf(infoPrefix)
+      primary = cotTrace.substring(0, idx).trim()
+      secondary = cotTrace.substring(idx).trim()
+    }
+
+    return { primary, secondary }
+  }
+
+  const { primary: primaryCoT, secondary: secondaryCoT } = splitCoTTrace(decision.cot_trace)
 
   // Copy text to clipboard
   const copyToClipboard = async (text: string, label: string) => {
@@ -264,8 +296,38 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
             <span className="text-xl">🤖</span>
           </div>
           <div>
-            <div className="font-bold" style={{ color: '#EAECEF' }}>
-              {t('cycle', language)} #{decision.cycle_number}
+            <div className="font-bold flex items-center gap-2" style={{ color: '#EAECEF' }}>
+              <span>{t('cycle', language)} #{decision.cycle_number}</span>
+              {decision.decisions && decision.decisions.length > 0 && (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {decision.decisions.map((action, idx) => {
+                    const isLong = action.action?.includes('long')
+                    const isShort = action.action?.includes('short')
+                    const isClose = action.action?.startsWith('close')
+                    let bgColor = 'rgba(132, 142, 156, 0.2)'
+                    let textColor = '#848E9C'
+                    if (isClose) {
+                      bgColor = 'rgba(240, 185, 11, 0.2)'
+                      textColor = '#F0B90B'
+                    } else if (isLong) {
+                      bgColor = 'rgba(14, 203, 129, 0.2)'
+                      textColor = '#0ECB81'
+                    } else if (isShort) {
+                      bgColor = 'rgba(246, 70, 93, 0.2)'
+                      textColor = '#F6465D'
+                    }
+                    return (
+                      <span
+                        key={idx}
+                        className="text-xs px-1.5 py-0.5 rounded font-medium"
+                        style={{ background: bgColor, color: textColor }}
+                      >
+                        {action.symbol?.replace('USDT', '')} {action.action?.replace('_', ' ')}
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
             </div>
             <div className="text-xs" style={{ color: '#848E9C' }}>
               {new Date(decision.timestamp).toLocaleString()}
@@ -413,17 +475,17 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
           </div>
         )}
 
-        {/* AI Thinking */}
-        {decision.cot_trace && (
+        {/* Primary AI Thinking - 主模型分析 */}
+        {primaryCoT && (
           <div>
             <button
               onClick={() => setShowCoT(!showCoT)}
               className="flex items-center gap-2 text-sm transition-colors w-full justify-between p-2 rounded hover:bg-white/5"
             >
               <div className="flex items-center gap-2">
-                <span className="text-base">🧠</span>
+                <span className="text-base">�</span>
                 <span className="font-semibold" style={{ color: '#F0B90B' }}>
-                  {t('aiThinking', language)}
+                  {secondaryCoT ? t('primaryAiThinking', language) : t('aiThinking', language)}
                 </span>
               </div>
               <span
@@ -438,11 +500,46 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
                 className="mt-2 rounded-lg p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto"
                 style={{
                   background: '#0B0E11',
-                  border: '1px solid #2B3139',
+                  border: '1px solid rgba(240, 185, 11, 0.2)',
                   color: '#EAECEF',
                 }}
               >
-                {decision.cot_trace}
+                {primaryCoT}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Secondary AI Review - 副模型审查 */}
+        {secondaryCoT && (
+          <div>
+            <button
+              onClick={() => setShowSecondaryCoT(!showSecondaryCoT)}
+              className="flex items-center gap-2 text-sm transition-colors w-full justify-between p-2 rounded hover:bg-white/5"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-base">🔍</span>
+                <span className="font-semibold" style={{ color: '#22d3ee' }}>
+                  {t('secondaryAiReview', language)}
+                </span>
+              </div>
+              <span
+                className="text-xs px-2 py-0.5 rounded"
+                style={{ background: 'rgba(34, 211, 238, 0.15)', color: '#22d3ee' }}
+              >
+                {showSecondaryCoT ? t('collapse', language) : t('expand', language)}
+              </span>
+            </button>
+            {showSecondaryCoT && (
+              <div
+                className="mt-2 rounded-lg p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto"
+                style={{
+                  background: '#0B0E11',
+                  border: '1px solid rgba(34, 211, 238, 0.2)',
+                  color: '#EAECEF',
+                }}
+              >
+                {secondaryCoT}
               </div>
             )}
           </div>

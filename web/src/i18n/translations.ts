@@ -67,6 +67,8 @@ export const translations = {
     failed: 'Failed',
     inputPrompt: 'Input Prompt',
     aiThinking: 'AI Chain of Thought',
+    primaryAiThinking: '🤖 Primary Model Analysis',
+    secondaryAiReview: '🔍 Secondary Model Review',
     collapse: 'Collapse',
     expand: 'Expand',
 
@@ -1276,6 +1278,8 @@ export const translations = {
     failed: '失败',
     inputPrompt: '输入提示',
     aiThinking: '💭 AI思维链分析',
+    primaryAiThinking: '🤖 主模型分析',
+    secondaryAiReview: '🔍 副模型审查',
     collapse: '▼ 收起',
     expand: '▶ 展开',
 
