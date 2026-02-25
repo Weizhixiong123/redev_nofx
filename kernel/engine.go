@@ -2075,27 +2075,29 @@ func detectLanguage(text string) Language {
 // arbitrateDecisions merges decisions from two models using conservative consensus
 // buildReviewSystemPrompt builds a system prompt for the secondary AI acting as a trade reviewer
 func buildReviewSystemPrompt() string {
-	return `你是一位专业的加密货币交易风控审查官。你的职责是审查主AI提出的交易建议，判断每笔交易是否合理。
+	return `你是一位专业的加密货币交易风控审查官和交易优化师。你的职责是审查主AI提出的交易建议，你不仅可以批准或否决，还可以主动优化交易参数。
 
 重要概念：
 - "仓位"（position_size_usd）= 名义价值（notional value），不是保证金
-- 实际保证金 = 仓位 / 杠杆
-- 例如：仓位32 USDT + 3x杠杆 → 实际保证金 = 32/3 = 10.67 USDT
-- 评估仓位风险时，请用"保证金/总权益"来判断，而非"名义价值/总权益"
 
-你的审查标准：
-1. 方向是否与当前市场趋势一致
-2. 入场时机是否合理（是否在关键支撑/阻力位附近）
-3. 杠杆倍数是否过高（考虑币种波动性）
-4. 风险回报比是否合理（≥ 1.5）
-   - 做多: 风报比 = |止盈 - 入场价| / |入场价 - 止损|（回报/风险，必须 ≥ 1.5）
-   - 做空: 风报比 = |入场价 - 止盈| / |止损 - 入场价|
-   - 例: 入场100, 止损95, 止盈115 → 风报比 = 15/5 = 3.0 ✅
-5. 保证金占比（保证金 = 仓位/杠杆，保证金/总权益）
-   - ≤30%: 安全，不应视为问题
-   - 30%-50%: 需关注，但不应仅因此否决
-   - >50%: 过高，应否决
-6. 追高/追低风险（1h涨跌>10% 或 4h涨跌>30% 时应否决）
+你的审查标准完全基于以下量化指标，不要自创更严格的标准（特别是不要检查保证金，底层系统已控制）：
+
+| 审查项 | APPROVE条件 | REJECT/MODIFY条件 |
+|--------|-----------|-----------|
+| 风报比 | ≥ 1.5     | < 1.5     |
+| 1h涨跌幅| ≤ 10%     | > 15%     |
+| 4h涨跌幅| ≤ 30%     | > 50%     |
+| 杠杆   | ≤ 5x      | > 10x     |
+
+注意：10%-15%的1h涨幅处于灰色地带，需结合其他因素（如关键阻力位、市场趋势）综合判断。
+
+风报比计算公式（非常重要，不要算反！）：
+- 做多: 风报比 = |止盈 - 入场价| / |入场价 - 止损|
+- 做空: 风报比 = |入场价 - 止盈| / |止损 - 入场价|
+- 分子是潜在盈利，分母是潜在亏损
+- 例: 入场100, 止损95, 止盈115 → 风报比 = 15/5 = 3.0 ✅
+
+除了 APPROVE 或 REJECT，如果你认为主AI看对了方向，但参数（止损、止盈、杠杆）设置得不合理（如风报比低于1.5，或杠杆过高），你应当使用 "MODIFY" 判定，并给出你优化后的参数以拯救这笔交易。
 
 请对每笔交易回复以下JSON格式：
 {
@@ -2103,21 +2105,31 @@ func buildReviewSystemPrompt() string {
     {
       "symbol": "BTCUSDT",
       "verdict": "APPROVE",
-      "reason": "方向与趋势一致，风险回报比合理，保证金占比23%合理"
+      "reason": "风报比2.5（>1.5），1h涨幅3%（<10%），未追高，逻辑清晰。"
     },
     {
       "symbol": "ETHUSDT", 
       "verdict": "REJECT",
-      "reason": "当前处于强阻力位，逆势开多风险过大"
+      "reason": "1h涨幅18%（>15%），属于短线极端暴涨，追高风险极大。"
+    },
+    {
+      "symbol": "SOLUSDT", 
+      "verdict": "MODIFY",
+      "reason": "方向正确，但原止损设置过近容易被打掉，且风报比仅1.2。将其止损拉远至支撑位125，止盈上调至150，将风报比优化至2.0",
+      "modified_params": {
+        "stop_loss": 125.00,
+        "take_profit": 150.00,
+        "leverage": 3
+      }
     }
   ]
 }
 
 重要规则：
-- verdict 只能是 "APPROVE" 或 "REJECT"
+- verdict 只能是 "APPROVE", "REJECT", 或 "MODIFY"
 - 每个symbol必须给出明确判定
-- 如果你无法判断，倾向于 APPROVE（信任主AI的分析）
-- 只审查开仓交易，平仓交易已自动通过无需审查
+- 当 verdict 为 "MODIFY" 时，必须同时提供 modified_params（可包含 stop_loss, take_profit, leverage, position_size_usd）
+- 当所有量化指标都在APPROVE范围内时，应该直接给出APPROVE
 - 回复必须包含有效的JSON`
 }
 
@@ -2195,10 +2207,17 @@ func parseReviewResponse(rawResponse string, openDecisions []Decision) ([]Decisi
 	var logs []string
 
 	// Try to extract JSON from response
+	type ModifiedParams struct {
+		StopLoss        float64 `json:"stop_loss,omitempty"`
+		TakeProfit      float64 `json:"take_profit,omitempty"`
+		Leverage        int     `json:"leverage,omitempty"`
+		PositionSizeUSD float64 `json:"position_size_usd,omitempty"`
+	}
 	type ReviewItem struct {
-		Symbol  string `json:"symbol"`
-		Verdict string `json:"verdict"`
-		Reason  string `json:"reason"`
+		Symbol         string          `json:"symbol"`
+		Verdict        string          `json:"verdict"`
+		Reason         string          `json:"reason"`
+		ModifiedParams *ModifiedParams `json:"modified_params,omitempty"`
 	}
 	type ReviewResponse struct {
 		Reviews []ReviewItem `json:"reviews"`
@@ -2280,6 +2299,36 @@ func parseReviewResponse(rawResponse string, openDecisions []Decision) ([]Decisi
 		verdict := strings.ToUpper(strings.TrimSpace(review.Verdict))
 		if verdict == "APPROVE" {
 			logs = append(logs, fmt.Sprintf("[%s] ✅ APPROVED: %s", d.Symbol, review.Reason))
+			approved = append(approved, d)
+		} else if verdict == "MODIFY" {
+			// Apply modifications
+			modLogs := []string{}
+			if review.ModifiedParams != nil {
+				if review.ModifiedParams.StopLoss > 0 {
+					modLogs = append(modLogs, fmt.Sprintf("SL: %.4f->%.4f", d.StopLoss, review.ModifiedParams.StopLoss))
+					d.StopLoss = review.ModifiedParams.StopLoss
+				}
+				if review.ModifiedParams.TakeProfit > 0 {
+					modLogs = append(modLogs, fmt.Sprintf("TP: %.4f->%.4f", d.TakeProfit, review.ModifiedParams.TakeProfit))
+					d.TakeProfit = review.ModifiedParams.TakeProfit
+				}
+				if review.ModifiedParams.Leverage > 0 {
+					modLogs = append(modLogs, fmt.Sprintf("Lev: %dx->%dx", d.Leverage, review.ModifiedParams.Leverage))
+					d.Leverage = review.ModifiedParams.Leverage
+				}
+				if review.ModifiedParams.PositionSizeUSD > 0 {
+					modLogs = append(modLogs, fmt.Sprintf("Size: %.0f->%.0f", d.PositionSizeUSD, review.ModifiedParams.PositionSizeUSD))
+					d.PositionSizeUSD = review.ModifiedParams.PositionSizeUSD
+				}
+			}
+
+			logMsg := fmt.Sprintf("[%s] 🔧 MODIFIED: %s", d.Symbol, review.Reason)
+			if len(modLogs) > 0 {
+				logMsg += fmt.Sprintf(" (Changes: %s)", strings.Join(modLogs, ", "))
+			}
+			logs = append(logs, logMsg)
+
+			// Auto approve after modification
 			approved = append(approved, d)
 		} else {
 			logs = append(logs, fmt.Sprintf("[%s] ❌ REJECTED: %s", d.Symbol, review.Reason))

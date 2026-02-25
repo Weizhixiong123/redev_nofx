@@ -277,6 +277,64 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
     URL.revokeObjectURL(url)
   }
 
+  const renderSecondaryReviewLog = (text: string) => {
+    if (!text) return null
+    return text.split('\n').map((line, i) => {
+      // Highlight specific log lines for better readability
+      if (line.includes('🔧 MODIFIED:') || line.includes('❌ REJECTED:') || line.includes('✅ APPROVED:')) {
+        const isModified = line.includes('🔧 MODIFIED:')
+        const isReject = line.includes('❌ REJECTED:')
+
+        const borderColor = isModified ? 'rgba(56, 189, 248, 0.4)' : isReject ? 'rgba(246, 70, 93, 0.4)' : 'rgba(14, 203, 129, 0.4)'
+        const bgColor = isModified ? 'rgba(56, 189, 248, 0.08)' : isReject ? 'rgba(246, 70, 93, 0.08)' : 'rgba(14, 203, 129, 0.08)'
+        const textColor = isModified ? '#38bdf8' : isReject ? '#F6465D' : '#0ECB81'
+
+        // Extract coin symbol
+        let symbol = ''
+        const symbolMatch = line.match(/^\[(.*?)\]/)
+        if (symbolMatch) {
+          symbol = symbolMatch[1]
+        }
+
+        // Extract modifications if present
+        let mainText = line
+        let changesStr = ''
+        const changesMatch = line.match(/\(Changes: (.*?)\)/)
+        if (changesMatch) {
+          changesStr = changesMatch[1]
+          mainText = line.replace(/\(Changes: .*?\)/, '').trim()
+        }
+
+        // Remove the prefix tags from main text for cleaner display
+        const cleanText = mainText.replace(/^\[.*?\] (🔧 MODIFIED:|❌ REJECTED:|✅ APPROVED:)\s*/, '')
+
+        return (
+          <div key={i} className="my-2 p-3 rounded-lg transition-colors hover:bg-opacity-80" style={{ border: `1px solid ${borderColor}`, background: bgColor }}>
+            <div style={{ color: '#EAECEF', fontSize: '13px', lineHeight: '1.6' }}>
+              <span className="inline-block px-1.5 py-0.5 rounded text-xs font-bold mr-2" style={{ background: borderColor, color: '#fff' }}>
+                {symbol}
+              </span>
+              <span style={{ color: textColor, fontWeight: 'bold', marginRight: '6px' }}>
+                {isModified ? '🔧 MODIFIED' : isReject ? '❌ REJECTED' : '✅ APPROVED'}
+              </span>
+              {cleanText}
+            </div>
+            {changesStr && (
+              <div className="flex flex-wrap gap-2 mt-3 pt-3" style={{ borderTop: `1px dashed ${borderColor}` }}>
+                {changesStr.split(', ').map((change, j) => (
+                  <div key={j} className="text-xs px-2.5 py-1 rounded shadow-sm" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', fontWeight: '600', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+                    {change}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      }
+      return <div key={i} className="mb-1">{line}</div>
+    })
+  }
+
   return (
     <div
       className="rounded-xl p-5 transition-all duration-300 hover:translate-y-[-2px]"
@@ -532,14 +590,14 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
             </button>
             {showSecondaryCoT && (
               <div
-                className="mt-2 rounded-lg p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto"
+                className="mt-2 rounded-lg p-4 text-sm font-mono max-h-96 overflow-y-auto"
                 style={{
                   background: '#0B0E11',
                   border: '1px solid rgba(34, 211, 238, 0.2)',
                   color: '#EAECEF',
                 }}
               >
-                {secondaryCoT}
+                {renderSecondaryReviewLog(secondaryCoT)}
               </div>
             )}
           </div>
