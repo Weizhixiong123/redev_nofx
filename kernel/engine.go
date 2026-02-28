@@ -13,6 +13,7 @@ import (
 	"nofx/store"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -249,12 +250,13 @@ func (e *StrategyEngine) GetConfig() *store.StrategyConfig {
 func GetFullDecision(ctx *Context, mcpClient mcp.AIClient) (*FullDecision, error) {
 	defaultConfig := store.GetDefaultStrategyConfig("en")
 	engine := NewStrategyEngine(&defaultConfig)
-	return GetFullDecisionWithStrategy(ctx, mcpClient, engine, "", nil)
+	return GetFullDecisionWithStrategy(ctx, mcpClient, engine, "", nil, "")
 }
 
 // GetFullDecisionWithStrategy uses StrategyEngine to get AI decision (unified prompt generation)
 // supports optional secondaryClient for dual-model consensus
-func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *StrategyEngine, variant string, secondaryClient mcp.AIClient) (*FullDecision, error) {
+// consensusMode: "double_blind" (default) or "review"
+func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *StrategyEngine, variant string, secondaryClient mcp.AIClient, consensusMode string) (*FullDecision, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is nil")
 	}
@@ -293,18 +295,38 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 	// 3. Build User Prompt using strategy engine
 	userPrompt := engine.BuildUserPrompt(ctx)
 
-	// 4. Call Primary AI
+	// 4. Call Primary and Secondary AIs in parallel
 	aiCallStart := time.Now()
 
 	var rawResponsePrimary string
 	var errPrimary error
+	var rawResponseSecondary string
+	var errSecondary error
 
-	rawResponsePrimary, errPrimary = mcpClient.CallWithMessages(systemPrompt, userPrompt)
-	if errPrimary != nil {
-		return nil, fmt.Errorf("AI API call failed: %w", errPrimary)
+	var wg sync.WaitGroup
+
+	// Primary Call
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rawResponsePrimary, errPrimary = mcpClient.CallWithMessages(systemPrompt, userPrompt)
+	}()
+
+	// Secondary Call (Parallel Double-Blind only)
+	if secondaryClient != nil && consensusMode == "double_blind" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rawResponseSecondary, errSecondary = secondaryClient.CallWithMessages(systemPrompt, userPrompt)
+		}()
 	}
 
+	wg.Wait()
 	aiCallDuration := time.Since(aiCallStart)
+
+	if errPrimary != nil {
+		return nil, fmt.Errorf("Primary AI call failed: %w", errPrimary)
+	}
 
 	// 5. Parse Primary AI response
 	decision, err := parseFullDecisionResponse(
@@ -320,48 +342,98 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 		return nil, err
 	}
 
-	// 6. If Secondary AI configured, use it to REVIEW primary's opening decisions
-	if secondaryClient != nil && decision != nil && len(decision.Decisions) > 0 {
-		// Separate close decisions (always allowed) from open decisions (need review)
-		var closeDecisions []Decision
-		var openDecisions []Decision
-		for _, d := range decision.Decisions {
-			if isCloseAction(d.Action) {
-				closeDecisions = append(closeDecisions, d)
-			} else if d.Action != "hold" && d.Action != "wait" {
-				openDecisions = append(openDecisions, d)
+	// 6. Secondary AI consensus
+	if secondaryClient != nil {
+		if consensusMode == "review" {
+			// === REVIEW MODE ===
+			// Primary AI decides, Secondary AI reviews open decisions (APPROVE/REJECT/MODIFY)
+			var closeDecisions []Decision
+			var openDecisions []Decision
+			var otherDecisions []Decision
+			for _, d := range decision.Decisions {
+				if isCloseAction(d.Action) {
+					closeDecisions = append(closeDecisions, d)
+				} else if d.Action == "open_long" || d.Action == "open_short" {
+					openDecisions = append(openDecisions, d)
+				} else {
+					otherDecisions = append(otherDecisions, d)
+				}
 			}
-		}
 
-		if len(openDecisions) > 0 {
-			// Build review prompt for secondary AI
-			reviewPrompt := buildReviewPrompt(openDecisions, ctx)
-			reviewSystemPrompt := buildReviewSystemPrompt()
+			if len(openDecisions) > 0 {
+				logger.Infof("🔍 [Review Mode] Secondary AI reviewing %d open decisions...", len(openDecisions))
+				reviewSystemPrompt := buildReviewSystemPrompt()
+				reviewUserPrompt := buildReviewPrompt(openDecisions, ctx)
 
-			logger.Infof("🔍 Sending %d opening decisions to Secondary AI for review...", len(openDecisions))
-			reviewStart := time.Now()
-			rawReviewResponse, errReview := secondaryClient.CallWithMessages(reviewSystemPrompt, reviewPrompt)
-			reviewDuration := time.Since(reviewStart)
-			aiCallDuration += reviewDuration
+				reviewResponse, reviewErr := secondaryClient.CallWithMessages(reviewSystemPrompt, reviewUserPrompt)
 
-			if errReview != nil {
-				logger.Warnf("Secondary AI review failed: %v. Using Primary decisions only.", errReview)
-				decision.CoTTrace += fmt.Sprintf("\n\n[Warning] Secondary AI review call failed: %v. All primary decisions kept.", errReview)
+				if reviewErr != nil {
+					logger.Warnf("Secondary AI review failed: %v. Fail-Close applied.", reviewErr)
+					decision.CoTTrace += fmt.Sprintf("\n\n[Warning] Secondary AI review failed: %v. Fail-Close: all open decisions removed.", reviewErr)
+					decision.Decisions = append(closeDecisions, otherDecisions...)
+				} else {
+					approvedDecisions, reviewLog := parseReviewResponse(reviewResponse, openDecisions)
+					var finalDecisions []Decision
+					finalDecisions = append(finalDecisions, closeDecisions...)
+					finalDecisions = append(finalDecisions, approvedDecisions...)
+					finalDecisions = append(finalDecisions, otherDecisions...)
+					decision.Decisions = finalDecisions
+					decision.CoTTrace += fmt.Sprintf("\n\n=== Secondary AI Review Log ===\n%s", strings.Join(reviewLog, "\n"))
+					decision.RawResponse += "\n\n--- SECONDARY AI REVIEW RESPONSE ---\n" + reviewResponse
+
+					rejectedCount := len(openDecisions) - len(approvedDecisions)
+					if rejectedCount > 0 {
+						logger.Infof("🛡️ Secondary AI rejected %d/%d open decisions", rejectedCount, len(openDecisions))
+					}
+				}
 			} else {
-				// Parse review results and filter decisions
-				approvedDecisions, reviewLog := parseReviewResponse(rawReviewResponse, openDecisions)
-
-				// Final decisions = close decisions (always) + approved open decisions
-				decision.Decisions = append(closeDecisions, approvedDecisions...)
-
-				decision.CoTTrace += fmt.Sprintf("\n\n=== Secondary AI Review Log ===\nOpen decisions submitted for review: %d\nApproved: %d, Rejected: %d\nClose decisions (auto-approved): %d\n%s",
-					len(openDecisions), len(approvedDecisions), len(openDecisions)-len(approvedDecisions), len(closeDecisions), strings.Join(reviewLog, "\n"))
-
-				decision.RawResponse += "\n\n--- SECONDARY REVIEW RESPONSE ---\n" + rawReviewResponse
+				decision.CoTTrace += "\n\n[Info] No open decisions for secondary AI review."
 			}
 		} else {
-			logger.Infof("🔍 No opening decisions to review, skipping Secondary AI call")
-			decision.CoTTrace += "\n\n[Info] No opening decisions from Primary AI, Secondary review skipped."
+			// === DOUBLE-BLIND MODE (default) ===
+			// Both AIs analyze independently, then arbitrate
+			if errSecondary != nil {
+				logger.Warnf("Secondary AI call failed: %v. Fail-Close applied to open decisions.", errSecondary)
+				decision.CoTTrace += fmt.Sprintf("\n\n[Warning] Secondary AI call failed: %v. Using primary close decisions only (Fail-Close).", errSecondary)
+
+				// Fail-Close: Only allow close actions if secondary is down
+				var closeDecisions []Decision
+				for _, d := range decision.Decisions {
+					if isCloseAction(d.Action) {
+						closeDecisions = append(closeDecisions, d)
+					}
+				}
+				decision.Decisions = closeDecisions
+			} else {
+				decisionSecondary, errSecParse := parseFullDecisionResponse(
+					rawResponseSecondary,
+					ctx.Account.TotalEquity,
+					riskConfig.BTCETHMaxLeverage,
+					riskConfig.AltcoinMaxLeverage,
+					riskConfig.BTCETHMaxPositionValueRatio,
+					riskConfig.AltcoinMaxPositionValueRatio,
+				)
+
+				if errSecParse != nil || decisionSecondary == nil {
+					logger.Warnf("Failed to parse secondary AI response: %v. Fail-Close applied.", errSecParse)
+					decision.CoTTrace += fmt.Sprintf("\n\n[Warning] Failed to parse secondary AI response: %v. Using primary close decisions only (Fail-Close).", errSecParse)
+
+					// Fail-Close
+					var closeDecisions []Decision
+					for _, d := range decision.Decisions {
+						if isCloseAction(d.Action) {
+							closeDecisions = append(closeDecisions, d)
+						}
+					}
+					decision.Decisions = closeDecisions
+				} else {
+					// Cross-check and arbitrate
+					mergedDecisions, arbitrationLog := arbitrateDecisions(decision.Decisions, decisionSecondary.Decisions)
+					decision.Decisions = mergedDecisions
+					decision.CoTTrace += fmt.Sprintf("\n\n=== Double-Blind Arbitration Log ===\n%s", strings.Join(arbitrationLog, "\n"))
+					decision.RawResponse += "\n\n--- SECONDARY FULL RESPONSE ---\n" + rawResponseSecondary
+				}
+			}
 		}
 	}
 
@@ -370,18 +442,7 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 		decision.SystemPrompt = systemPrompt
 		decision.UserPrompt = userPrompt
 		decision.AIRequestDurationMs = aiCallDuration.Milliseconds()
-		// If single mode, this is just primary response
-		if decision.RawResponse == "" {
-			decision.RawResponse = rawResponsePrimary
-		}
-	}
-
-	// The error 'err' here would be from the primary parsing.
-	// If primary parsing failed, we would have returned nil, err earlier.
-	// So, this final check is redundant if the earlier 'if err != nil { return nil, err }' is present.
-	// Keeping it as per the provided instruction, but noting potential redundancy.
-	if err != nil {
-		return decision, fmt.Errorf("failed to parse AI response: %w", err)
+		decision.RawResponse = "--- PRIMARY FULL RESPONSE ---\n" + rawResponsePrimary + decision.RawResponse
 	}
 
 	return decision, nil
@@ -1032,6 +1093,32 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString(fmt.Sprintf("- Max Margin Usage: ≤%.0f%%\n", riskControl.MaxMarginUsage*100))
 	sb.WriteString(fmt.Sprintf("- Min Position Size: ≥%.0f USDT\n\n", riskControl.MinPositionSize))
 
+	// New: Hard stop-loss and cooldown rules
+	maxStopLossPct := riskControl.MaxStopLossPct
+	if maxStopLossPct <= 0 {
+		maxStopLossPct = 3.0
+	}
+	minTakeProfitPct := riskControl.MinTakeProfitPct
+	if minTakeProfitPct <= 0 {
+		minTakeProfitPct = 1.5
+	}
+	cooldownMin := riskControl.SameSymbolCooldownMin
+	if cooldownMin <= 0 {
+		cooldownMin = 10
+	}
+	maxTradesPerDay := riskControl.MaxTradesPerSymbolPerDay
+	if maxTradesPerDay <= 0 {
+		maxTradesPerDay = 3
+	}
+
+	sb.WriteString("## CODE ENFORCED - Anti-Overtrading (防过度交易，后端强制执行):\n")
+	sb.WriteString(fmt.Sprintf("- **Hard Stop-Loss**: Positions losing ≥%.1f%% will be FORCE CLOSED by backend\n", maxStopLossPct))
+	sb.WriteString(fmt.Sprintf("  → You MUST set stop_loss within %.1f%% of entry price. NO wider stops allowed!\n", maxStopLossPct))
+	sb.WriteString(fmt.Sprintf("- **Min Take-Profit**: Do NOT close profitable positions BELOW +%.1f%% gain\n", minTakeProfitPct))
+	sb.WriteString(fmt.Sprintf("  → Let profits run to at least +%.1f%% before considering any close\n", minTakeProfitPct))
+	sb.WriteString(fmt.Sprintf("- **Cooldown**: After closing a position, the SAME symbol is BLOCKED for %d minutes\n", cooldownMin))
+	sb.WriteString(fmt.Sprintf("- **Daily Limit**: Max %d trades per symbol per day. Do NOT overtrade the same coin!\n\n", maxTradesPerDay))
+
 	sb.WriteString("## AI GUIDED (Recommended, you should follow):\n")
 	sb.WriteString(fmt.Sprintf("- Trading Leverage: Altcoins max %dx | BTC/ETH max %dx\n",
 		riskControl.AltcoinMaxLeverage, riskControl.BTCETHMaxLeverage))
@@ -1041,7 +1128,10 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("  - SHORT: Reward = |entry - take_profit| / |stop_loss - entry| = Risk-Reward Ratio\n")
 	sb.WriteString("  - Example LONG: entry=100, SL=95, TP=115 → Reward/Risk = 15/5 = 3.0 ✅\n")
 	sb.WriteString("  - Example BAD:  entry=100, SL=80, TP=102 → Reward/Risk = 2/20 = 0.1 ❌\n")
-	sb.WriteString(fmt.Sprintf("- Min Confidence: ≥%d to open position\n\n", riskControl.MinConfidence))
+	sb.WriteString(fmt.Sprintf("- Min Confidence: ≥%d to open position\n", riskControl.MinConfidence))
+	sb.WriteString(fmt.Sprintf("- **Min Take-Profit Target**: ≥+%.1f%% (do NOT take tiny profits like 0.1%% or 0.3%%!)\n", minTakeProfitPct))
+	sb.WriteString("- **Anti 'Small Win Big Loss' Rule**: Your average win MUST be larger than average loss\n")
+	sb.WriteString("  → If recent avg_win < avg_loss, raise your take-profit targets!\n\n")
 
 	// Position sizing guidance
 	sb.WriteString("## Position Sizing Guidance\n")
@@ -2072,7 +2162,88 @@ func detectLanguage(text string) Language {
 	return LangEnglish
 }
 
-// arbitrateDecisions merges decisions from two models using conservative consensus
+// arbitrateDecisions merges decisions from two models using conservative double-blind consensus
+func arbitrateDecisions(primaryDecisions, secondaryDecisions []Decision) ([]Decision, []string) {
+	var merged []Decision
+	var logs []string
+
+	primaryMap := make(map[string]Decision)
+	for _, d := range primaryDecisions {
+		primaryMap[d.Symbol] = d
+	}
+
+	secondaryMap := make(map[string]Decision)
+	for _, d := range secondaryDecisions {
+		secondaryMap[d.Symbol] = d
+	}
+
+	symbols := make(map[string]bool)
+	for k := range primaryMap {
+		symbols[k] = true
+	}
+	for k := range secondaryMap {
+		symbols[k] = true
+	}
+
+	for sym := range symbols {
+		pDec, pExists := primaryMap[sym]
+		sDec, sExists := secondaryMap[sym]
+
+		pIsClose := pExists && isCloseAction(pDec.Action)
+		sIsClose := sExists && isCloseAction(sDec.Action)
+
+		pIsOpen := pExists && !pIsClose && pDec.Action != "wait" && pDec.Action != "hold"
+		sIsOpen := sExists && !sIsClose && sDec.Action != "wait" && sDec.Action != "hold"
+
+		// 1. Close Conditions (Safety First): If either AI suggests closing, execute the close action
+		if pIsClose || sIsClose {
+			if pIsClose && sIsClose {
+				logs = append(logs, fmt.Sprintf("[%s] ✅ BOTH agreed to close (Safety First). Primary params executed.", sym))
+				merged = append(merged, pDec)
+			} else if pIsClose {
+				logs = append(logs, fmt.Sprintf("[%s] ⚠️ ONLY Primary suggested close. Executed (Safety First).", sym))
+				merged = append(merged, pDec)
+			} else if sIsClose {
+				logs = append(logs, fmt.Sprintf("[%s] ⚠️ ONLY Secondary suggested close. Executed (Safety First).", sym))
+				merged = append(merged, sDec)
+			}
+			continue
+		}
+
+		// 2. Open Conditions: BOTH must agree to open in the same direction
+		if pIsOpen && sIsOpen {
+			if pDec.Action == sDec.Action {
+				logs = append(logs, fmt.Sprintf("[%s] 🔥 BOTH AIs agreed to %s! Trade approved.", sym, pDec.Action))
+				merged = append(merged, pDec) // Intentionally use Primary's parameters for simplicity
+			} else {
+				logs = append(logs, fmt.Sprintf("[%s] ❌ Conflict: Primary suggests %s, Secondary suggests %s. Trade cancelled.", sym, pDec.Action, sDec.Action))
+			}
+			continue
+		}
+
+		// 3. Signal Misses (One AI finds it, the other missed/waits)
+		if pIsOpen && !sIsOpen {
+			reason := "WAIT/HOLD/NO SIGNAL"
+			if sExists {
+				reason = sDec.Action
+			}
+			logs = append(logs, fmt.Sprintf("[%s] ❌ Primary suggests %s, but Secondary says %s. Trade cancelled.", sym, pDec.Action, reason))
+			continue
+		}
+
+		if sIsOpen && !pIsOpen {
+			reason := "WAIT/HOLD/NO SIGNAL"
+			if pExists {
+				reason = pDec.Action
+			}
+			logs = append(logs, fmt.Sprintf("[%s] ❌ Secondary suggests %s, but Primary says %s. Trade cancelled.", sym, sDec.Action, reason))
+			continue
+		}
+	}
+
+	return merged, logs
+}
+
 // buildReviewSystemPrompt builds a system prompt for the secondary AI acting as a trade reviewer
 func buildReviewSystemPrompt() string {
 	return `你是一位专业的加密货币交易风控审查官和交易优化师。你的职责是审查主AI提出的交易建议，你不仅可以批准或否决，还可以主动优化交易参数。
@@ -2192,6 +2363,18 @@ func buildReviewPrompt(openDecisions []Decision, ctx *Context) string {
 				if mData.PriceChange4h != 0 {
 					sb.WriteString(fmt.Sprintf("- 4h涨跌幅: %.2f%%\n", mData.PriceChange4h))
 				}
+				if mData.CurrentEMA20 != 0 {
+					sb.WriteString(fmt.Sprintf("- EMA20: %.4f\n", mData.CurrentEMA20))
+				}
+				if mData.CurrentRSI7 != 0 {
+					sb.WriteString(fmt.Sprintf("- RSI(7): %.2f\n", mData.CurrentRSI7))
+				}
+				if mData.CurrentMACD != 0 {
+					sb.WriteString(fmt.Sprintf("- MACD: %.4f\n", mData.CurrentMACD))
+				}
+				if mData.OpenInterest != nil {
+					sb.WriteString(fmt.Sprintf("- 持仓量(OI): %.2f\n", mData.OpenInterest.Latest))
+				}
 			}
 		}
 		sb.WriteString("\n")
@@ -2257,14 +2440,12 @@ func parseReviewResponse(rawResponse string, openDecisions []Decision) ([]Decisi
 					logs = append(logs, fmt.Sprintf("[%s] ✅ APPROVED by reviewer (lenient parse)", d.Symbol))
 					approved = append(approved, d)
 				} else {
-					// Can't determine, default to approve (trust primary)
-					logs = append(logs, fmt.Sprintf("[%s] ⚠️ Review unclear, defaulting to APPROVE", d.Symbol))
-					approved = append(approved, d)
+					// Can't determine, default to REJECT for safety
+					logs = append(logs, fmt.Sprintf("[%s] ⚠️ Review unclear, defaulting to REJECT (Fail-Close)", d.Symbol))
 				}
 			} else {
-				// Symbol not mentioned in review, default to approve
-				logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not mentioned in review, defaulting to APPROVE", d.Symbol))
-				approved = append(approved, d)
+				// Symbol not mentioned in review, default to REJECT for safety
+				logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not mentioned in review, defaulting to REJECT (Fail-Close)", d.Symbol))
 			}
 		}
 		return approved, logs
@@ -2290,9 +2471,8 @@ func parseReviewResponse(rawResponse string, openDecisions []Decision) ([]Decisi
 		}
 
 		if !found {
-			// Not reviewed, default to approve (trust primary)
-			logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not in review response, defaulting to APPROVE", d.Symbol))
-			approved = append(approved, d)
+			// Not reviewed, default to REJECT for safety (Fail-Close)
+			logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not in review response, defaulting to REJECT (Fail-Close)", d.Symbol))
 			continue
 		}
 

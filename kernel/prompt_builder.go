@@ -57,12 +57,20 @@ func (pb *PromptBuilder) buildSystemPromptZH() string {
 
 ### 风险优先
 - 保证金使用率不得超过30%
-- 单个持仓亏损达到-5%必须止损
+- 单个持仓亏损达到-3%必须止损（后端会强制执行）
 - 优先保护资本，再考虑盈利
 
-### 跟踪止盈
-- 当持仓盈亏从峰值回撤30%时，考虑部分或全部止盈
-- 例如：Peak PnL +5%，Current PnL +3.5% → 回撤了30%，应该止盈
+### 跟踪止盈（防止"盈小亏大"）
+- ❌ 禁止在盈利不到1.5%时主动平仓（除非触发止损）
+- ✅ 让利润奔跑：至少等到+2%以上才考虑止盈
+- 当持仓盈亏从峰值回撤25%时，考虑部分或全部止盈
+- 例如：Peak PnL +4%，Current PnL +3% → 回撤了25%，可以部分止盈
+- 平均盈利金额必须大于平均亏损金额，否则提高止盈目标
+
+### 冷却期与频率控制
+- 平仓后同一标的需等待至少10分钟才能重新开仓
+- 每个标的每天最多交易3次（开仓次数）
+- 不要在刚平仓的标的上立即反手操作
 
 ### 顺势交易
 - 只在多个时间框架趋势一致时进场
@@ -72,7 +80,7 @@ func (pb *PromptBuilder) buildSystemPromptZH() string {
 
 ### 分批操作
 - 分批建仓：第一次开仓不超过目标仓位的50%
-- 分批止盈：盈利3%平33%，盈利5%平50%，盈利8%全平
+- 分批止盈：盈利2%平33%，盈利4%平50%，盈利6%以上全平
 - 只在盈利仓位上加仓，永远不要追亏损
 
 ## 输出格式要求
@@ -98,7 +106,7 @@ func (pb *PromptBuilder) buildSystemPromptZH() string {
 
 - **symbol**: 交易对（必需）
 - **action**: 动作类型（必需）
-  - HOLD: 持有当前仓位
+  - HOLD: 持有当前仓位（如果需要调整止损/止盈，请提供新的stop_loss/take_profit值）
   - PARTIAL_CLOSE: 部分平仓
   - FULL_CLOSE: 全部平仓
   - ADD_POSITION: 在现有仓位上加仓
@@ -106,8 +114,8 @@ func (pb *PromptBuilder) buildSystemPromptZH() string {
   - WAIT: 等待，不采取任何行动
 - **leverage**: 杠杆倍数（开新仓时必需）
 - **position_size_usd**: 仓位大小（USDT，开新仓时必需）
-- **stop_loss**: 止损价格（开新仓时建议提供）
-- **take_profit**: 止盈价格（开新仓时建议提供）
+- **stop_loss**: 止损价格（开新仓，或者HOLD动作需要移动止损时提供）
+- **take_profit**: 止盈价格（开新仓，或者HOLD动作需要移动止盈时提供）
 - **confidence**: 信心度（0-100）
 - **reasoning**: 推理过程（必需，必须详细说明决策依据）
 
@@ -192,12 +200,20 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
 
 ### Risk First
 - Margin usage must not exceed 30%
-- Must stop-loss when single position loss reaches -5%
+- Must stop-loss when single position loss reaches -3% (backend ENFORCED)
 - Capital protection first, profit second
 
-### Trailing Take-Profit
-- Consider partial/full profit-taking when PnL pulls back 30% from peak
-- Example: Peak PnL +5%, Current PnL +3.5% → 30% drawdown, should take profit
+### Trailing Take-Profit (Anti "Small Win Big Loss")
+- ❌ Do NOT close profitable positions below +1.5% gain (unless stop-loss triggered)
+- ✅ Let profits run: wait for at least +2% before considering take-profit
+- Consider partial/full profit-taking when PnL pulls back 25% from peak
+- Example: Peak PnL +4%, Current PnL +3% → 25% drawdown, can partially close
+- Average win amount MUST be larger than average loss amount
+
+### Cooldown & Frequency Control
+- After closing a position, wait at least 10 minutes before re-opening same symbol
+- Max 3 trades per symbol per day (opening count)
+- Do NOT immediately reverse on a just-closed symbol
 
 ### Trend Following
 - Only enter when trends align across multiple timeframes
@@ -207,7 +223,7 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
 
 ### Scale Operations
 - Scale-in: First entry max 50% of target position
-- Scale-out: Close 33% at +3%, 50% at +5%, 100% at +8%
+- Scale-out: Close 33% at +2%, 50% at +4%, 100% at +6%
 - Only add to winning positions, never average down losers
 
 ## Output Format Requirements
@@ -233,7 +249,7 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
 
 - **symbol**: Trading pair (required)
 - **action**: Action type (required)
-  - HOLD: Hold current position
+  - HOLD: Hold current position (provide new stop_loss/take_profit values if updating orders)
   - PARTIAL_CLOSE: Partially close position
   - FULL_CLOSE: Fully close position
   - ADD_POSITION: Add to existing position
@@ -241,8 +257,8 @@ func (pb *PromptBuilder) buildSystemPromptEN() string {
   - WAIT: Wait, take no action
 - **leverage**: Leverage multiplier (required for new positions)
 - **position_size_usd**: Position size in USDT (required for new positions)
-- **stop_loss**: Stop-loss price (recommended for new positions)
-- **take_profit**: Take-profit price (recommended for new positions)
+- **stop_loss**: Stop-loss price (provide for new positions, or to update during HOLD)
+- **take_profit**: Take-profit price (provide for new positions, or to update during HOLD)
 - **confidence**: Confidence level (0-100)
 - **reasoning**: Detailed reasoning (required, must explain decision basis)
 

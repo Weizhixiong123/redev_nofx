@@ -30,6 +30,7 @@ interface FormState {
   trader_name: string
   ai_model: string
   secondary_ai_model: string
+  consensus_mode: string
   exchange_id: string
   strategy_id: string
   is_cross_margin: boolean
@@ -62,6 +63,7 @@ export function TraderConfigModal({
     trader_name: '',
     ai_model: '',
     secondary_ai_model: '',
+    consensus_mode: 'review',
     exchange_id: '',
     strategy_id: '',
     is_cross_margin: true,
@@ -107,6 +109,7 @@ export function TraderConfigModal({
         ...traderData,
         strategy_id: traderData.strategy_id || '',
         secondary_ai_model: traderData.secondary_ai_model_id || '',
+        consensus_mode: traderData.consensus_mode || 'review',
       })
       if (traderData.secondary_ai_model_id) {
         setShowDualModel(true)
@@ -116,6 +119,7 @@ export function TraderConfigModal({
         trader_name: '',
         ai_model: availableModels[0]?.id || '',
         secondary_ai_model: '',
+        consensus_mode: 'review',
         exchange_id: availableExchanges[0]?.id || '',
         strategy_id: '',
         is_cross_margin: true,
@@ -171,6 +175,7 @@ export function TraderConfigModal({
         name: formData.trader_name,
         ai_model_id: formData.ai_model,
         secondary_ai_model_id: formData.secondary_ai_model || undefined,
+        consensus_mode: showDualModel ? formData.consensus_mode : undefined,
         exchange_id: formData.exchange_id,
         strategy_id: formData.strategy_id,
         is_cross_margin: formData.is_cross_margin,
@@ -325,8 +330,27 @@ export function TraderConfigModal({
                           </option>
                         ))}
                       </select>
+                    </div>
+                  )}
+
+                  {/* Consensus Mode Selector - Aligned under Primary AI Model */}
+                  {showDualModel && (
+                    <div className="col-span-2 md:col-span-1">
+                      <label className="text-sm text-[#EAECEF] block mb-2">共识模式</label>
+                      <select
+                        value={formData.consensus_mode}
+                        onChange={(e) =>
+                          handleInputChange('consensus_mode', e.target.value)
+                        }
+                        className="w-full px-3 py-2 bg-[#0B0E11] border border-[#2B3139] rounded text-[#EAECEF] text-sm focus:border-[#F0B90B] focus:outline-none"
+                      >
+                        <option value="double_blind">🔥 双盲共识 (Double-Blind)</option>
+                        <option value="review">📋 审查共识 (Review)</option>
+                      </select>
                       <p className="text-xs text-[#848E9C] mt-1">
-                        需两个模型同时给出相同方向信号才开单
+                        {formData.consensus_mode === 'review'
+                          ? '副AI审查主AI的开仓决策（可批准/拒绝/修改参数）'
+                          : '需两个模型同时给出相同方向信号才开单'}
                       </p>
                     </div>
                   )}

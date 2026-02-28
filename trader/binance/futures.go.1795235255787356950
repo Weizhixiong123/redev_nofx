@@ -64,10 +64,10 @@ type FuturesTrader struct {
 }
 
 type FundingFeeRecord struct {
-	TranID int64
-	Symbol string
-	Amount float64
-	TimeMs int64
+	TranID  int64
+	Symbol  string
+	Amount  float64
+	TimeMs  int64
 }
 
 // NewFuturesTrader creates futures trader

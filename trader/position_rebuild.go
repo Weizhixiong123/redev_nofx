@@ -13,11 +13,12 @@ import (
 
 // openTradeEntry represents an opening trade for position tracking
 type openTradeEntry struct {
-	Price    float64
-	Quantity float64
-	Fee      float64
-	Time     time.Time
-	TradeID  string
+	Price      float64
+	Quantity   float64
+	Fee        float64
+	FundingFee float64
+	Time       time.Time
+	TradeID    string
 }
 
 // positionState tracks open trades for a symbol+side combination
@@ -69,11 +70,12 @@ func RebuildPositionsFromTrades(trades []TradeRecord) []ClosedPnLRecord {
 		if trade.RealizedPnL == 0 {
 			// Opening trade: add to open trades list
 			state.OpenTrades = append(state.OpenTrades, openTradeEntry{
-				Price:    trade.Price,
-				Quantity: trade.Quantity,
-				Fee:      trade.Fee,
-				Time:     trade.Time,
-				TradeID:  trade.TradeID,
+				Price:      trade.Price,
+				Quantity:   trade.Quantity,
+				Fee:        trade.Fee,
+				FundingFee: trade.FundingFee,
+				Time:       trade.Time,
+				TradeID:    trade.TradeID,
 			})
 			state.TotalQty += trade.Quantity
 		} else {
@@ -123,6 +125,7 @@ func buildClosedPosition(trade TradeRecord, side string, state *positionState) *
 	var entryPrice float64
 	var entryTime time.Time
 	var totalEntryFee float64
+	var totalEntryFundingFee float64
 
 	if len(state.OpenTrades) > 0 {
 		// Use FIFO to match open trades
@@ -140,6 +143,7 @@ func buildClosedPosition(trade TradeRecord, side string, state *positionState) *
 			weightedSum += ot.Price * matchQty
 			matchedQty += matchQty
 			totalEntryFee += ot.Fee * (matchQty / ot.Quantity)
+			totalEntryFundingFee += ot.FundingFee * (matchQty / ot.Quantity)
 
 			if entryTime.IsZero() {
 				entryTime = ot.Time
@@ -186,6 +190,7 @@ func buildClosedPosition(trade TradeRecord, side string, state *positionState) *
 		Quantity:    trade.Quantity,
 		RealizedPnL: trade.RealizedPnL,
 		Fee:         trade.Fee + totalEntryFee,
+		FundingFee:  trade.FundingFee + totalEntryFundingFee,
 		EntryTime:   entryTime,
 		ExitTime:    trade.Time,
 		OrderID:     trade.TradeID,

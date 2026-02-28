@@ -163,6 +163,7 @@ export interface CreateTraderRequest {
   name: string
   ai_model_id: string
   secondary_ai_model_id?: string // Added for Dual AI
+  consensus_mode?: string // "double_blind" or "review"
   exchange_id: string
   strategy_id?: string // 策略ID（新版，使用保存的策略配置）
   initial_balance?: number // 可选：创建时由后端自动获取，编辑时可手动更新
@@ -239,6 +240,7 @@ export interface TraderConfigData {
   trader_name: string
   ai_model: string
   secondary_ai_model_id?: string
+  consensus_mode?: string  // "double_blind" or "review"
   exchange_id: string
   strategy_id?: string  // 策略ID
   strategy_name?: string  // 策略名称
@@ -749,6 +751,7 @@ export interface HistoricalPosition {
   exit_time: string;
   realized_pnl: number;
   fee: number;
+  funding_fee: number;
   leverage: number;
   status: string;
   close_reason: string;
@@ -766,6 +769,7 @@ export interface TraderStats {
   sharpe_ratio: number;
   total_pnl: number;
   total_fee: number;
+  total_funding_fee: number;
   avg_win: number;
   avg_loss: number;
   max_drawdown_pct: number;

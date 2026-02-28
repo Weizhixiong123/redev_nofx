@@ -404,6 +404,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         name: data.name,
         ai_model_id: data.ai_model_id,
         secondary_ai_model_id: data.secondary_ai_model_id || undefined,
+        consensus_mode: data.consensus_mode || undefined,
         exchange_id: data.exchange_id,
         strategy_id: data.strategy_id,
         initial_balance: data.initial_balance,

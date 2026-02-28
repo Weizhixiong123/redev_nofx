@@ -31,6 +31,7 @@ type AutoTraderConfig struct {
 	Name             string // Trader display name
 	AIModel          string // AI model: "qwen" or "deepseek"
 	SecondaryAIModel string // Secondary AI model for dual-consensus (optional)
+	ConsensusMode    string // Consensus mode: "review" or "double_blind"
 
 	// Trading platform selection
 	Exchange   string // Exchange type: "binance", "bybit", "okx", "bitget", "gate", "hyperliquid", "aster" or "lighter"
@@ -144,6 +145,20 @@ type AutoTrader struct {
 	lastBalanceSyncTime   time.Time          // Last balance sync time
 	userID                string             // User ID
 	gridState             *GridState         // Grid trading state (only used when StrategyType == "grid_trading")
+
+	// [RISK CONTROL] SameSymbolCooldownMin: records last close time per symbol
+	symbolLastClosedTime      map[string]time.Time
+	symbolLastClosedTimeMutex sync.RWMutex
+
+	// [RISK CONTROL] MaxTradesPerSymbolPerDay: records open trade count per symbol per day
+	symbolDailyTradeCount      map[string]int
+	symbolDailyTradeCountDate  time.Time // UTC date of last reset
+	symbolDailyTradeCountMutex sync.RWMutex
+
+	// [RISK CONTROL] Profit Pool: per-symbol daily risk budget
+	symbolRiskBudget      map[string]float64 // remaining risk budget per symbol (USDT)
+	symbolRiskBudgetDate  time.Time          // UTC date of last reset
+	symbolRiskBudgetMutex sync.RWMutex
 }
 
 // NewAutoTrader creates an automatic trader
@@ -366,6 +381,13 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		peakPnLCacheMutex:     sync.RWMutex{},
 		lastBalanceSyncTime:   time.Now(),
 		userID:                userID,
+		// Risk control state
+		symbolLastClosedTime:      make(map[string]time.Time),
+		symbolDailyTradeCount:     make(map[string]int),
+		symbolDailyTradeCountDate: time.Now().UTC(),
+		// Profit pool
+		symbolRiskBudget:     make(map[string]float64),
+		symbolRiskBudgetDate: time.Now().UTC(),
 	}
 
 	// Initialize secondary AI client if configured
@@ -653,7 +675,7 @@ func (at *AutoTrader) runCycle() error {
 
 	// 5. Use strategy engine to call AI for decision
 	logger.Infof("🤖 Requesting AI analysis and decision... [Strategy Engine] (Dual-AI: %v)", at.mcpClientSecondary != nil)
-	aiDecision, err := kernel.GetFullDecisionWithStrategy(ctx, at.mcpClient, at.strategyEngine, "balanced", at.mcpClientSecondary)
+	aiDecision, err := kernel.GetFullDecisionWithStrategy(ctx, at.mcpClient, at.strategyEngine, "balanced", at.mcpClientSecondary, at.config.ConsensusMode)
 
 	if aiDecision != nil && aiDecision.AIRequestDurationMs > 0 {
 		record.AIRequestDurationMs = aiDecision.AIRequestDurationMs
@@ -1147,6 +1169,21 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		return err
 	}
 
+	// [CODE ENFORCED] Same symbol cooldown check
+	if err := at.enforceSameSymbolCooldown(decision.Symbol); err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Max trades per symbol per day (backup limit)
+	if err := at.enforceMaxTradesPerSymbolPerDay(decision.Symbol); err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Profit Pool: check risk budget before opening
+	if err := at.checkAndReserveRiskBudget(decision.Symbol, decision.PositionSizeUSD, decision.Leverage); err != nil {
+		return err
+	}
+
 	// Check if there's already a position in the same symbol and direction
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
@@ -1231,6 +1268,9 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 
 	logger.Infof("  ✓ Position opened successfully, order ID: %v, quantity: %.4f", order["orderId"], quantity)
 
+	// [RISK CONTROL] Increment daily trade count after successful open
+	at.incrementSymbolDailyTradeCount(decision.Symbol)
+
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "open_long", quantity, marketData.CurrentPrice, decision.Leverage, 0)
 
@@ -1261,6 +1301,21 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 
 	// [CODE ENFORCED] Check max positions limit
 	if err := at.enforceMaxPositions(len(positions)); err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Same symbol cooldown check
+	if err := at.enforceSameSymbolCooldown(decision.Symbol); err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Max trades per symbol per day (backup limit)
+	if err := at.enforceMaxTradesPerSymbolPerDay(decision.Symbol); err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Profit Pool: check risk budget before opening
+	if err := at.checkAndReserveRiskBudget(decision.Symbol, decision.PositionSizeUSD, decision.Leverage); err != nil {
 		return err
 	}
 
@@ -1348,6 +1403,9 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 
 	logger.Infof("  ✓ Position opened successfully, order ID: %v, quantity: %.4f", order["orderId"], quantity)
 
+	// [RISK CONTROL] Increment daily trade count after successful open
+	at.incrementSymbolDailyTradeCount(decision.Symbol)
+
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "open_short", quantity, marketData.CurrentPrice, decision.Leverage, 0)
 
@@ -1426,6 +1484,15 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *kernel.Decision, acti
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_long", quantity, marketData.CurrentPrice, 0, entryPrice)
 
+	// [RISK CONTROL] Record close time for cooldown enforcement
+	at.recordSymbolClosed(decision.Symbol)
+
+	// [RISK CONTROL] Profit Pool: replenish budget if profitable
+	if entryPrice > 0 && quantity > 0 {
+		estimatedPnL := (marketData.CurrentPrice - entryPrice) * quantity
+		at.replenishRiskBudget(decision.Symbol, estimatedPnL)
+	}
+
 	logger.Infof("  ✓ Position closed successfully")
 	return nil
 }
@@ -1489,6 +1556,15 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *kernel.Decision, act
 
 	// Record order to database and poll for confirmation
 	at.recordAndConfirmOrder(order, decision.Symbol, "close_short", quantity, marketData.CurrentPrice, 0, entryPrice)
+
+	// [RISK CONTROL] Record close time for cooldown enforcement
+	at.recordSymbolClosed(decision.Symbol)
+
+	// [RISK CONTROL] Profit Pool: replenish budget if profitable
+	if entryPrice > 0 && quantity > 0 {
+		estimatedPnL := (entryPrice - marketData.CurrentPrice) * quantity // short: profit when price drops
+		at.replenishRiskBudget(decision.Symbol, estimatedPnL)
+	}
 
 	logger.Infof("  ✓ Position closed successfully")
 	return nil
@@ -1905,6 +1981,26 @@ func (at *AutoTrader) checkPositionDrawdown() {
 		var drawdownPct float64
 		if peakPnLPct > 0 && currentPnLPct < peakPnLPct {
 			drawdownPct = ((peakPnLPct - currentPnLPct) / peakPnLPct) * 100
+		}
+
+		// [CODE ENFORCED] MaxStopLossPct: Force close if position loss exceeds threshold
+		if at.config.StrategyConfig != nil {
+			maxStopLoss := at.config.StrategyConfig.RiskControl.MaxStopLossPct
+			if maxStopLoss <= 0 {
+				maxStopLoss = 3.0 // Default: -3%
+			}
+			if currentPnLPct < -maxStopLoss {
+				logger.Infof("🚨 [RISK CONTROL] MaxStopLoss triggered: %s %s | Loss: %.2f%% (limit: -%.1f%%)",
+					symbol, side, currentPnLPct, maxStopLoss)
+				if err := at.emergencyClosePosition(symbol, side); err != nil {
+					logger.Infof("❌ MaxStopLoss close failed (%s %s): %v", symbol, side, err)
+				} else {
+					logger.Infof("✅ MaxStopLoss close succeeded: %s %s", symbol, side)
+					at.ClearPeakPnLCache(symbol, side)
+					at.recordSymbolClosed(symbol) // Start cooldown after forced close
+				}
+				continue
+			}
 		}
 
 		// Check close position condition: profit > 5% and drawdown >= 40%
@@ -2366,6 +2462,166 @@ func getSideFromAction(action string) string {
 	default:
 		return "BUY"
 	}
+}
+
+// enforceSameSymbolCooldown checks if a symbol is in cooldown after being closed (CODE ENFORCED)
+// Prevents re-entry into the same symbol too soon after closing a position
+func (at *AutoTrader) enforceSameSymbolCooldown(symbol string) error {
+	if at.config.StrategyConfig == nil {
+		return nil
+	}
+
+	cooldownMin := at.config.StrategyConfig.RiskControl.SameSymbolCooldownMin
+	if cooldownMin <= 0 {
+		cooldownMin = 10 // Default: 10 minutes
+	}
+
+	at.symbolLastClosedTimeMutex.RLock()
+	lastClosed, exists := at.symbolLastClosedTime[symbol]
+	at.symbolLastClosedTimeMutex.RUnlock()
+
+	if !exists {
+		return nil // No previous close, allow
+	}
+
+	elapsed := time.Since(lastClosed)
+	cooldown := time.Duration(cooldownMin) * time.Minute
+	if elapsed < cooldown {
+		remaining := cooldown - elapsed
+		return fmt.Errorf("❌ [RISK CONTROL] %s is in cooldown after close (%.0f min remaining, cooldown=%d min)",
+			symbol, remaining.Minutes(), cooldownMin)
+	}
+	return nil
+}
+
+// enforceMaxTradesPerSymbolPerDay checks if a symbol has reached its daily open trade limit (CODE ENFORCED)
+// Resets the counter automatically at UTC midnight
+func (at *AutoTrader) enforceMaxTradesPerSymbolPerDay(symbol string) error {
+	if at.config.StrategyConfig == nil {
+		return nil
+	}
+
+	maxTrades := at.config.StrategyConfig.RiskControl.MaxTradesPerSymbolPerDay
+	if maxTrades <= 0 {
+		maxTrades = 3 // Default: 3 trades per symbol per day
+	}
+
+	now := time.Now().UTC()
+
+	at.symbolDailyTradeCountMutex.Lock()
+	defer at.symbolDailyTradeCountMutex.Unlock()
+
+	// Reset count if date has changed (UTC midnight)
+	if now.Year() != at.symbolDailyTradeCountDate.Year() ||
+		now.YearDay() != at.symbolDailyTradeCountDate.YearDay() {
+		logger.Infof("📅 [RISK CONTROL] UTC date changed, resetting daily trade counts")
+		at.symbolDailyTradeCount = make(map[string]int)
+		at.symbolDailyTradeCountDate = now
+	}
+
+	count := at.symbolDailyTradeCount[symbol]
+	if count >= maxTrades {
+		return fmt.Errorf("❌ [RISK CONTROL] %s has reached daily trade limit (%d/%d today)",
+			symbol, count, maxTrades)
+	}
+	return nil
+}
+
+// incrementSymbolDailyTradeCount increments the trade count for a symbol after a successful open
+func (at *AutoTrader) incrementSymbolDailyTradeCount(symbol string) {
+	at.symbolDailyTradeCountMutex.Lock()
+	at.symbolDailyTradeCount[symbol]++
+	count := at.symbolDailyTradeCount[symbol]
+	at.symbolDailyTradeCountMutex.Unlock()
+	logger.Infof("📊 [RISK CONTROL] %s daily trade count: %d", symbol, count)
+}
+
+// recordSymbolClosed records the close time for a symbol (for cooldown enforcement)
+func (at *AutoTrader) recordSymbolClosed(symbol string) {
+	at.symbolLastClosedTimeMutex.Lock()
+	at.symbolLastClosedTime[symbol] = time.Now()
+	at.symbolLastClosedTimeMutex.Unlock()
+	logger.Infof("⏱️ [RISK CONTROL] %s close time recorded (cooldown starts now)", symbol)
+}
+
+// checkAndReserveRiskBudget checks if the symbol has enough daily risk budget for a new trade (CODE ENFORCED)
+// Budget cost = positionSizeUSD (the actual margin invested by the user)
+func (at *AutoTrader) checkAndReserveRiskBudget(symbol string, positionSizeUSD float64, leverage int) error {
+	if at.config.StrategyConfig == nil {
+		return nil
+	}
+	budgetPct := at.config.StrategyConfig.RiskControl.DailyRiskBudgetPct
+	if budgetPct <= 0 {
+		return nil // Profit pool disabled, skip
+	}
+
+	now := time.Now().UTC()
+	at.symbolRiskBudgetMutex.Lock()
+	defer at.symbolRiskBudgetMutex.Unlock()
+
+	// Reset all budgets at UTC midnight
+	if now.Year() != at.symbolRiskBudgetDate.Year() ||
+		now.YearDay() != at.symbolRiskBudgetDate.YearDay() {
+		logger.Infof("📅 [PROFIT POOL] UTC date changed, resetting all risk budgets")
+		at.symbolRiskBudget = make(map[string]float64)
+		at.symbolRiskBudgetDate = now
+	}
+
+	// Initialize budget for this symbol if first trade today
+	if _, exists := at.symbolRiskBudget[symbol]; !exists {
+		initialBudget := at.initialBalance * budgetPct
+		at.symbolRiskBudget[symbol] = initialBudget
+		logger.Infof("💰 [PROFIT POOL] %s: initialized daily budget = %.2f USDT (%.1f%% of %.2f)",
+			symbol, initialBudget, budgetPct*100, at.initialBalance)
+	}
+
+	// Budget cost = margin (保证金) = positionSizeUSD / leverage
+	// 例：合约面值 30U ÷ 3x 杠杆 = 10U 保证金
+	lev := leverage
+	if lev <= 0 {
+		lev = 10
+	}
+	potentialLoss := positionSizeUSD / float64(lev)
+
+	remaining := at.symbolRiskBudget[symbol]
+	if potentialLoss > remaining {
+		return fmt.Errorf("❌ [PROFIT POOL] %s: insufficient risk budget. Need %.2f USDT but only %.2f remaining today",
+			symbol, potentialLoss, remaining)
+	}
+
+	// Reserve (deduct) the budget
+	at.symbolRiskBudget[symbol] -= potentialLoss
+	logger.Infof("💰 [PROFIT POOL] %s: reserved %.2f USDT, remaining budget = %.2f USDT",
+		symbol, potentialLoss, at.symbolRiskBudget[symbol])
+	return nil
+}
+
+// replenishRiskBudget adds back a portion of realized profit to the symbol's daily risk budget
+func (at *AutoTrader) replenishRiskBudget(symbol string, realizedPnL float64) {
+	if at.config.StrategyConfig == nil {
+		return
+	}
+	budgetPct := at.config.StrategyConfig.RiskControl.DailyRiskBudgetPct
+	reinvestRate := at.config.StrategyConfig.RiskControl.ProfitReinvestRate
+	if budgetPct <= 0 || reinvestRate <= 0 {
+		return // Profit pool disabled
+	}
+	if realizedPnL <= 0 {
+		logger.Infof("💰 [PROFIT POOL] %s: closed with loss %.2f USDT, no budget replenishment", symbol, realizedPnL)
+		return // Only replenish on profit
+	}
+
+	replenish := realizedPnL * reinvestRate
+
+	at.symbolRiskBudgetMutex.Lock()
+	defer at.symbolRiskBudgetMutex.Unlock()
+
+	if _, exists := at.symbolRiskBudget[symbol]; !exists {
+		at.symbolRiskBudget[symbol] = 0
+	}
+	at.symbolRiskBudget[symbol] += replenish
+	logger.Infof("⭐ [PROFIT POOL] %s: profit +%.2f USDT → replenished %.2f USDT (%.0f%%), new budget = %.2f USDT",
+		symbol, realizedPnL, replenish, reinvestRate*100, at.symbolRiskBudget[symbol])
 }
 
 // GetOpenOrders returns open orders (pending SL/TP) from exchange

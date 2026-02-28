@@ -1,4 +1,4 @@
-package binance
+﻿package binance
 
 import (
 	"fmt"
@@ -14,8 +14,8 @@ import (
 
 // syncState stores the last sync time (Unix ms) for incremental sync
 var (
-	binanceSyncState             = make(map[string]int64) // exchangeID -> lastSyncTimeMs (Unix ms)
-	binanceSyncStateMutex        sync.RWMutex
+	binanceSyncState      = make(map[string]int64) // exchangeID -> lastSyncTimeMs (Unix ms)
+	binanceSyncStateMutex sync.RWMutex
 	binanceFundingSyncState      = make(map[string]int64) // exchangeID -> lastFundingSyncTimeMs (Unix ms)
 	binanceFundingSyncStateMutex sync.RWMutex
 )
@@ -337,7 +337,7 @@ func (t *FuturesTrader) syncFundingFees(traderID, exchangeID string, lastFunding
 
 	if latestFundingTimeMs > 0 {
 		binanceFundingSyncStateMutex.Lock()
-		binanceFundingSyncState[exchangeID] = latestFundingTimeMs + 1
+		binanceFundingSyncState[exchangeID] = latestFundingTimeMs
 		binanceFundingSyncStateMutex.Unlock()
 	}
 

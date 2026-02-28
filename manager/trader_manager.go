@@ -9,6 +9,7 @@ import (
 	"nofx/store"
 	"nofx/trader"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -661,12 +662,23 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		}
 	}
 
+	consensusMode := strings.ToLower(strings.TrimSpace(traderCfg.ConsensusMode))
+	if consensusMode == "" {
+		consensusMode = "review"
+	} else if consensusMode == "doubble_blind" {
+		consensusMode = "double_blind"
+	} else if consensusMode != "review" && consensusMode != "double_blind" {
+		logger.Warnf("invalid consensus_mode=%q for trader %s, defaulting to review", traderCfg.ConsensusMode, traderCfg.Name)
+		consensusMode = "review"
+	}
+
 	// Build AutoTraderConfig (ai500APIURL/oiTopAPIURL obtained from strategy config, used in StrategyEngine)
 	traderConfig := trader.AutoTraderConfig{
 		ID:                    traderCfg.ID,
 		Name:                  traderCfg.Name,
 		AIModel:               aiModelCfg.Provider,
 		SecondaryAIModel:      "",                       // Will be set below
+		ConsensusMode:         consensusMode,            // "double_blind" or "review"
 		Exchange:              exchangeCfg.ExchangeType, // Exchange type: binance/bybit/okx/etc
 		ExchangeID:            exchangeCfg.ID,           // Exchange account UUID (for multi-account)
 		BinanceAPIKey:         "",

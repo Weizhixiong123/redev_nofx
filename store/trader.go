@@ -24,6 +24,7 @@ type Trader struct {
 	Name                string    `gorm:"column:name;not null" json:"name"`
 	AIModelID           string    `gorm:"column:ai_model_id;not null" json:"ai_model_id"`
 	SecondaryAIModelID  string    `gorm:"column:secondary_ai_model_id;default:''" json:"secondary_ai_model_id"`
+	ConsensusMode       string    `gorm:"column:consensus_mode;default:'review'" json:"consensus_mode"`
 	ExchangeID          string    `gorm:"column:exchange_id;not null" json:"exchange_id"`
 	StrategyID          string    `gorm:"column:strategy_id;default:''" json:"strategy_id"`
 	InitialBalance      float64   `gorm:"column:initial_balance;not null" json:"initial_balance"`
@@ -76,6 +77,9 @@ func (s *TraderStore) initTables() error {
 
 // Create creates trader
 func (s *TraderStore) Create(trader *Trader) error {
+	if trader.ConsensusMode == "" {
+		trader.ConsensusMode = "review"
+	}
 	return s.db.Create(trader).Error
 }
 
@@ -110,10 +114,19 @@ func (s *TraderStore) Update(trader *Trader) error {
 	fmt.Printf("📝 TraderStore.Update: ID=%s, Name=%s, AIModelID=%s, StrategyID=%s\n",
 		trader.ID, trader.Name, trader.AIModelID, trader.StrategyID)
 
+	// Default consensus_mode to review when not set
+	consensusMode := trader.ConsensusMode
+	if consensusMode == "" {
+		consensusMode = "review"
+	} else if consensusMode == "doubble_blind" {
+		consensusMode = "double_blind"
+	}
+
 	updates := map[string]interface{}{
 		"name":                  trader.Name,
 		"ai_model_id":           trader.AIModelID,
 		"secondary_ai_model_id": trader.SecondaryAIModelID,
+		"consensus_mode":        consensusMode, // always explicit, never skipped by GORM
 		"exchange_id":           trader.ExchangeID,
 		"strategy_id":           trader.StrategyID,
 		"is_cross_margin":       trader.IsCrossMargin,

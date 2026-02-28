@@ -550,7 +550,7 @@ export function PositionHistory({ traderId }: PositionHistoryProps) {
             title={t('positionHistory.totalPnL', language)}
             value={((stats.total_pnl || 0) >= 0 ? '+' : '') + formatNumber(stats.total_pnl || 0)}
             color={(stats.total_pnl || 0) >= 0 ? '#0ECB81' : '#F6465D'}
-            subtitle={`${t('positionHistory.fee', language)}: -${formatNumber(stats.total_fee || 0)}`}
+            subtitle={`${t('positionHistory.fee', language)}: -${formatNumber(stats.total_fee || 0)} | ${language === 'zh' ? '资金费' : 'Funding'}: ${(stats.total_funding_fee || 0) > 0 ? '+' : ''}${formatNumber(stats.total_funding_fee || 0)}`}
             metricKey="total_return"
             language={language}
           />
@@ -614,8 +614,8 @@ export function PositionHistory({ traderId }: PositionHistoryProps) {
           <StatCard
             icon="💵"
             title={t('positionHistory.netPnL', language)}
-            value={((stats.total_pnl || 0) - (stats.total_fee || 0) >= 0 ? '+' : '') + formatNumber((stats.total_pnl || 0) - (stats.total_fee || 0))}
-            color={(stats.total_pnl || 0) - (stats.total_fee || 0) >= 0 ? '#0ECB81' : '#F6465D'}
+            value={((stats.total_pnl || 0) - (stats.total_fee || 0) + (stats.total_funding_fee || 0) >= 0 ? '+' : '') + formatNumber((stats.total_pnl || 0) - (stats.total_fee || 0) + (stats.total_funding_fee || 0))}
+            color={(stats.total_pnl || 0) - (stats.total_fee || 0) + (stats.total_funding_fee || 0) >= 0 ? '#0ECB81' : '#F6465D'}
             subtitle={t('positionHistory.netPnLDesc', language)}
             language={language}
           />

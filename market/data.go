@@ -228,6 +228,7 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 	// Calculate current indicators (based on 3-minute latest data)
 	currentPrice := klines3m[len(klines3m)-1].Close
 	currentEMA20 := calculateEMA(klines3m, 20)
+	currentTEMA := calculateTEMA(klines3m, 9)
 	currentMACD := calculateMACD(klines3m)
 	currentRSI7 := calculateRSI(klines3m, 7)
 
@@ -272,6 +273,7 @@ func GetWithExchange(symbol, exchange string) (*Data, error) {
 		PriceChange1h:     priceChange1h,
 		PriceChange4h:     priceChange4h,
 		CurrentEMA20:      currentEMA20,
+		CurrentTEMA:       currentTEMA,
 		CurrentMACD:       currentMACD,
 		CurrentRSI7:       currentRSI7,
 		OpenInterest:      oiData,
@@ -366,11 +368,12 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 	// Calculate current indicators (based on primary timeframe latest data)
 	currentPrice := primaryKlines[len(primaryKlines)-1].Close
 	currentEMA20 := calculateEMA(primaryKlines, 20)
+	currentTEMA := calculateTEMA(primaryKlines, 9)
 	currentMACD := calculateMACD(primaryKlines)
 	currentRSI7 := calculateRSI(primaryKlines, 7)
 
 	// Calculate price changes
-	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60) // 1 hour
+	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60)  // 1 hour
 	priceChange4h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 240) // 4 hours
 
 	// Get OI data
@@ -388,6 +391,7 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		PriceChange1h: priceChange1h,
 		PriceChange4h: priceChange4h,
 		CurrentEMA20:  currentEMA20,
+		CurrentTEMA:   currentTEMA,
 		CurrentMACD:   currentMACD,
 		CurrentRSI7:   currentRSI7,
 		OpenInterest:  oiData,
@@ -408,6 +412,7 @@ func calculateTimeframeSeries(klines []Kline, timeframe string, count int) *Time
 		MidPrices:   make([]float64, 0, count),
 		EMA20Values: make([]float64, 0, count),
 		EMA50Values: make([]float64, 0, count),
+		TEMAValues:  make([]float64, 0, count),
 		MACDValues:  make([]float64, 0, count),
 		RSI7Values:  make([]float64, 0, count),
 		RSI14Values: make([]float64, 0, count),
@@ -448,6 +453,12 @@ func calculateTimeframeSeries(klines []Kline, timeframe string, count int) *Time
 		if i >= 49 {
 			ema50 := calculateEMA(klines[:i+1], 50)
 			data.EMA50Values = append(data.EMA50Values, ema50)
+		}
+
+		// Calculate TEMA for each point
+		if i >= 8 {
+			tema := calculateTEMA(klines[:i+1], 9)
+			data.TEMAValues = append(data.TEMAValues, tema)
 		}
 
 		// Calculate MACD for each point
@@ -568,6 +579,65 @@ func calculateEMA(klines []Kline, period int) float64 {
 	}
 
 	return ema
+}
+
+// calculateTEMA calculates TEMA
+// EMA1 = EMA(Close, Period)
+// EMA2 = EMA(EMA1, Period)
+// EMA3 = EMA(EMA2, Period)
+// TEMA = (3 * EMA1) - (3 * EMA2) + EMA3
+func calculateTEMA(klines []Kline, period int) float64 {
+	if len(klines) < period {
+		return 0
+	}
+
+	// 1. Array of EMA1
+	ema1 := make([]float64, len(klines))
+	sum := 0.0
+	for i := 0; i < period; i++ {
+		sum += klines[i].Close
+	}
+	ema1[period-1] = sum / float64(period)
+	multiplier := 2.0 / float64(period+1)
+
+	for i := period; i < len(klines); i++ {
+		ema1[i] = (klines[i].Close-ema1[i-1])*multiplier + ema1[i-1]
+	}
+
+	// 2. Array of EMA2 (from EMA1)
+	if len(klines) < 2*period-1 {
+		return 0
+	}
+	ema2 := make([]float64, len(klines))
+	sum = 0.0
+	start2 := 2*period - 2
+	for i := period - 1; i <= start2; i++ {
+		sum += ema1[i]
+	}
+	ema2[start2] = sum / float64(period)
+
+	for i := start2 + 1; i < len(klines); i++ {
+		ema2[i] = (ema1[i]-ema2[i-1])*multiplier + ema2[i-1]
+	}
+
+	// 3. Array of EMA3 (from EMA2)
+	if len(klines) < 3*period-2 {
+		return 0
+	}
+	ema3 := make([]float64, len(klines))
+	sum = 0.0
+	start3 := 3*period - 3
+	for i := start2; i <= start3; i++ {
+		sum += ema2[i]
+	}
+	ema3[start3] = sum / float64(period)
+
+	for i := start3 + 1; i < len(klines); i++ {
+		ema3[i] = (ema2[i]-ema3[i-1])*multiplier + ema3[i-1]
+	}
+
+	last := len(klines) - 1
+	return 3*ema1[last] - 3*ema2[last] + ema3[last]
 }
 
 // calculateMACD calculates MACD

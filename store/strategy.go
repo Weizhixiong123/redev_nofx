@@ -227,6 +227,36 @@ type RiskControlConfig struct {
 	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
 	// Min AI confidence to open position (AI guided)
 	MinConfidence int `json:"min_confidence"`
+
+	// === 新增：针对"盈小亏大"和"过度交易"的风控参数 ===
+
+	// Max stop-loss percentage per position (CODE ENFORCED, default: 3.0 means -3%)
+	// 当持仓亏损超过该比例时，代码强制平仓，不依赖 AI 判断
+	MaxStopLossPct float64 `json:"max_stop_loss_pct"`
+
+	// Min take-profit percentage before closing (AI GUIDED, default: 1.5 means +1.5%)
+	// AI 在盈利未达到该比例前，不应主动平仓（除非触发跟踪止盈）
+	MinTakeProfitPct float64 `json:"min_take_profit_pct"`
+
+	// Same symbol cooldown in minutes after closing (CODE ENFORCED, default: 10)
+	// 平仓后在该冷却期内，不允许对同一标的重新开仓，防止冲动追单
+	SameSymbolCooldownMin int `json:"same_symbol_cooldown_min"`
+
+	// Max trades per symbol per day (CODE ENFORCED, default: 3)
+	// 每个标的每天最多交易次数（开仓次数），防止同一标的过度交易
+	// 当 DailyRiskBudgetPct > 0 时，此字段作为补充保险仍然生效
+	MaxTradesPerSymbolPerDay int `json:"max_trades_per_symbol_per_day"`
+
+	// === 盈利池（Profit Pool）风控参数 ===
+
+	// DailyRiskBudgetPct: 每标的每日初始风险预算 = 账户净值 × 此比例 (CODE ENFORCED)
+	// 例如：0.01 表示净值的 1%；200 USDT 账户 → 每标的 2 USDT 风险额度
+	// 设为 0 则退回传统次数限制（MaxTradesPerSymbolPerDay）
+	DailyRiskBudgetPct float64 `json:"daily_risk_budget_pct"`
+
+	// ProfitReinvestRate: 每次盈利平仓后，将利润的此比例补充回当日风险预算 (CODE ENFORCED)
+	// 例如：0.30 表示利润的 30% 归还预算，允许在赚钱后继续交易同一标的
+	ProfitReinvestRate float64 `json:"profit_reinvest_rate"`
 }
 
 // NewStrategyStore creates a new StrategyStore
@@ -312,8 +342,16 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			AltcoinMaxPositionValueRatio: 1.0, // Altcoin: max position = 1x equity (CODE ENFORCED)
 			MaxMarginUsage:               0.9, // Max 90% margin usage (CODE ENFORCED)
 			MinPositionSize:              12,  // Min 12 USDT per position (CODE ENFORCED)
-			MinRiskRewardRatio:           3.0, // Min 3:1 profit/loss ratio (AI guided)
+			MinRiskRewardRatio:           2.0, // Min 2:1 profit/loss ratio (AI guided)
 			MinConfidence:                75,  // Min 75% confidence (AI guided)
+			// 新增：防止"盈小亏大"和"过度交易"
+			MaxStopLossPct:           3.0, // 亏损超 3% 强制止损 (CODE ENFORCED)
+			MinTakeProfitPct:         1.5, // 至少 1.5% 盈利才止盈 (AI GUIDED)
+			SameSymbolCooldownMin:    10,  // 平仓后冷却 10 分钟 (CODE ENFORCED)
+			MaxTradesPerSymbolPerDay: 3,   // 每标的每天最多 3 次开仓 (CODE ENFORCED, 盈利池模式下作为保险)
+			// 盈利池（Profit Pool）
+			DailyRiskBudgetPct: 0.20, // 每标的每日初始风险预算 = 净值的 20%（如 53U 账户 → 每币 10.6U）
+			ProfitReinvestRate: 0.30, // 盈利的 30% 归还预算（亏钱不补充）
 		},
 	}
 

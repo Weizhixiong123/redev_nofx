@@ -1,0 +1,89 @@
+{
+  "name": "ai500中长线资产配置策略原版",
+  "description": "",
+  "config": {
+    "language": "zh",
+    "coin_source": {
+      "source_type": "mixed",
+      "static_coins": [
+        "BTCUSDT",
+        "ETHUSDT"
+      ],
+      "use_ai500": true,
+      "ai500_limit": 10,
+      "use_oi_top": false,
+      "oi_top_limit": 20,
+      "use_oi_low": false
+    },
+    "indicators": {
+      "klines": {
+        "primary_timeframe": "5m",
+        "primary_count": 30,
+        "longer_timeframe": "4h",
+        "longer_count": 10,
+        "enable_multi_timeframe": true,
+        "selected_timeframes": [
+          "5m",
+          "15m",
+          "1h",
+          "4h"
+        ]
+      },
+      "enable_raw_klines": true,
+      "enable_ema": false,
+      "enable_macd": false,
+      "enable_rsi": false,
+      "enable_atr": false,
+      "enable_boll": true,
+      "enable_volume": false,
+      "enable_oi": false,
+      "enable_funding_rate": false,
+      "ema_periods": [
+        20,
+        50
+      ],
+      "rsi_periods": [
+        7,
+        14
+      ],
+      "atr_periods": [
+        14
+      ],
+      "boll_periods": [
+        20
+      ],
+      "nofxos_api_key": "cm_568c67eae410d912c54c",
+      "enable_quant_data": true,
+      "enable_quant_oi": true,
+      "enable_quant_netflow": true,
+      "enable_oi_ranking": true,
+      "oi_ranking_duration": "1h",
+      "oi_ranking_limit": 10,
+      "enable_netflow_ranking": true,
+      "netflow_ranking_duration": "1h",
+      "netflow_ranking_limit": 10,
+      "enable_price_ranking": true,
+      "price_ranking_duration": "1h,4h,24h",
+      "price_ranking_limit": 10
+    },
+    "risk_control": {
+      "max_positions": 3,
+      "btc_eth_max_leverage": 5,
+      "altcoin_max_leverage": 5,
+      "btc_eth_max_position_value_ratio": 5,
+      "altcoin_max_position_value_ratio": 3,
+      "max_margin_usage": 0.9,
+      "min_position_size": 12,
+      "min_risk_reward_ratio": 3,
+      "min_confidence": 75
+    },
+    "prompt_sections": {
+      "role_definition": "# 你是一个专业的加密货币AI500优质资产配置员\n\n你的任务是根据提供的市场数据做出交易决策。你是一个经验丰富的量化交易员，擅长技术分析和风险管理。",
+      "trading_frequency": "# ⏱️ 交易频率意识\n\n- 优秀交易员：每天2-4笔\n- 不要频繁交易，做资产配置拿住趋势就好\n- 每小时超过2笔开平仓，就是平凡交易了！！！",
+      "entry_standards": "# 🎯 入场标准（严格）\n\n1.一定要增剧ai500，kline，持仓量变化，市场数据，找出优质的ai500资产拿中长线\n2.也可以一直拿着超过一周都行\n3.频繁开平仓是大忌，每小时都在做交易是大忌\n4.ai500资产设置好止损，止盈可以设置大一点，就死拿就好了",
+      "decision_process": "# 📋 决策流程\n\n1. 检查持仓 → 是否止盈/止损\n2. 扫描候选币种 + 多时间框架 → 是否存在强信号\n3. 先写思维链，再输出结构化JSON"
+    }
+  },
+  "exported_at": "2026-02-01T04:57:39.113Z",
+  "version": "1.0"
+}

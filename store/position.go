@@ -11,17 +11,18 @@ import (
 
 // TraderStats trading statistics metrics
 type TraderStats struct {
-	TotalTrades    int     `json:"total_trades"`
-	WinTrades      int     `json:"win_trades"`
-	LossTrades     int     `json:"loss_trades"`
-	WinRate        float64 `json:"win_rate"`
-	ProfitFactor   float64 `json:"profit_factor"`
-	SharpeRatio    float64 `json:"sharpe_ratio"`
-	TotalPnL       float64 `json:"total_pnl"`
-	TotalFee       float64 `json:"total_fee"`
-	AvgWin         float64 `json:"avg_win"`
-	AvgLoss        float64 `json:"avg_loss"`
-	MaxDrawdownPct float64 `json:"max_drawdown_pct"`
+	TotalTrades     int     `json:"total_trades"`
+	WinTrades       int     `json:"win_trades"`
+	LossTrades      int     `json:"loss_trades"`
+	WinRate         float64 `json:"win_rate"`
+	ProfitFactor    float64 `json:"profit_factor"`
+	SharpeRatio     float64 `json:"sharpe_ratio"`
+	TotalPnL        float64 `json:"total_pnl"`
+	TotalFee        float64 `json:"total_fee"`
+	TotalFundingFee float64 `json:"total_funding_fee"`
+	AvgWin          float64 `json:"avg_win"`
+	AvgLoss         float64 `json:"avg_loss"`
+	MaxDrawdownPct  float64 `json:"max_drawdown_pct"`
 }
 
 // TraderPosition position record
@@ -44,12 +45,13 @@ type TraderPosition struct {
 	ExitTime           int64   `gorm:"column:exit_time;index:idx_positions_exit" json:"exit_time"` // Unix milliseconds UTC, 0 means not set
 	RealizedPnL        float64 `gorm:"column:realized_pnl;default:0" json:"realized_pnl"`
 	Fee                float64 `gorm:"column:fee;default:0" json:"fee"`
+	FundingFee         float64 `gorm:"column:funding_fee;default:0" json:"funding_fee"`
 	Leverage           int     `gorm:"column:leverage;default:1" json:"leverage"`
 	Status             string  `gorm:"column:status;default:OPEN;index:idx_positions_status" json:"status"`
 	CloseReason        string  `gorm:"column:close_reason;default:''" json:"close_reason"`
 	Source             string  `gorm:"column:source;default:system" json:"source"`
-	CreatedAt          int64   `gorm:"column:created_at" json:"created_at"`   // Unix milliseconds UTC
-	UpdatedAt          int64   `gorm:"column:updated_at" json:"updated_at"`   // Unix milliseconds UTC
+	CreatedAt          int64   `gorm:"column:created_at" json:"created_at"` // Unix milliseconds UTC
+	UpdatedAt          int64   `gorm:"column:updated_at" json:"updated_at"` // Unix milliseconds UTC
 }
 
 // TableName returns the table name
@@ -130,14 +132,14 @@ func (s *PositionStore) Create(pos *TraderPosition) error {
 func (s *PositionStore) ClosePosition(id int64, exitPrice float64, exitOrderID string, realizedPnL float64, fee float64, closeReason string) error {
 	nowMs := time.Now().UTC().UnixMilli()
 	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"exit_price":   exitPrice,
+		"exit_price":    exitPrice,
 		"exit_order_id": exitOrderID,
-		"exit_time":    nowMs,
-		"realized_pnl": realizedPnL,
-		"fee":          fee,
-		"status":       "CLOSED",
-		"close_reason": closeReason,
-		"updated_at":   nowMs,
+		"exit_time":     nowMs,
+		"realized_pnl":  realizedPnL,
+		"fee":           fee,
+		"status":        "CLOSED",
+		"close_reason":  closeReason,
+		"updated_at":    nowMs,
 	}).Error
 }
 
@@ -159,6 +161,7 @@ func (s *PositionStore) UpdatePositionQuantityAndPrice(id int64, addQty float64,
 	// Use 8 decimal places for price precision (crypto standard)
 	newEntryPrice = math.Round(newEntryPrice*100000000) / 100000000
 	newFee := pos.Fee + addFee
+	newFundingFee := pos.FundingFee // NOTE: Add funding fee param if needed later
 	nowMs := time.Now().UTC().UnixMilli()
 
 	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
@@ -166,6 +169,7 @@ func (s *PositionStore) UpdatePositionQuantityAndPrice(id int64, addQty float64,
 		"entry_quantity": newEntryQty,
 		"entry_price":    newEntryPrice,
 		"fee":            newFee,
+		"funding_fee":    newFundingFee,
 		"updated_at":     nowMs,
 	}).Error
 }
@@ -201,6 +205,7 @@ func (s *PositionStore) ReducePositionQuantity(id int64, reduceQty float64, exit
 		return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
 			"quantity":     0,
 			"fee":          newFee,
+			"funding_fee":  pos.FundingFee,
 			"exit_price":   newExitPrice,
 			"realized_pnl": newPnL,
 			"status":       "CLOSED",
@@ -213,6 +218,7 @@ func (s *PositionStore) ReducePositionQuantity(id int64, reduceQty float64, exit
 	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
 		"quantity":     newQty,
 		"fee":          newFee,
+		"funding_fee":  pos.FundingFee,
 		"exit_price":   newExitPrice,
 		"realized_pnl": newPnL,
 		"updated_at":   nowMs,
@@ -231,7 +237,7 @@ func (s *PositionStore) UpdatePositionExchangeInfo(id int64, exchangeID, exchang
 
 // ClosePositionFully marks position as fully closed
 // exitTimeMs is Unix milliseconds UTC
-func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrderID string, exitTimeMs int64, totalRealizedPnL float64, totalFee float64, closeReason string) error {
+func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrderID string, exitTimeMs int64, totalRealizedPnL float64, totalFee float64, closeReason string, totalFundingFee float64) error {
 	var pos TraderPosition
 	if err := s.db.First(&pos, id).Error; err != nil {
 		return fmt.Errorf("failed to get position: %w", err)
@@ -243,15 +249,16 @@ func (s *PositionStore) ClosePositionFully(id int64, exitPrice float64, exitOrde
 	}
 
 	return s.db.Model(&TraderPosition{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"quantity":       quantity,
-		"exit_price":     exitPrice,
-		"exit_order_id":  exitOrderID,
-		"exit_time":      exitTimeMs,
-		"realized_pnl":   totalRealizedPnL,
-		"fee":            totalFee,
-		"status":         "CLOSED",
-		"close_reason":   closeReason,
-		"updated_at":     time.Now().UTC().UnixMilli(),
+		"quantity":      quantity,
+		"exit_price":    exitPrice,
+		"exit_order_id": exitOrderID,
+		"exit_time":     exitTimeMs,
+		"realized_pnl":  totalRealizedPnL,
+		"fee":           totalFee,
+		"funding_fee":   totalFundingFee,
+		"status":        "CLOSED",
+		"close_reason":  closeReason,
+		"updated_at":    time.Now().UTC().UnixMilli(),
 	}).Error
 }
 
@@ -312,6 +319,47 @@ func (s *PositionStore) GetOpenPositionBySymbol(traderID, symbol, side string) (
 	return nil, err
 }
 
+// AddFundingFeeBySymbolAtTime adds funding fee to the position that covered the event time.
+// It prefers OPEN positions first, then CLOSED positions whose holding window includes eventTimeMs.
+func (s *PositionStore) AddFundingFeeBySymbolAtTime(traderID, exchangeID, symbol string, eventTimeMs int64, fundingFee float64) error {
+	if fundingFee == 0 {
+		return nil
+	}
+
+	var pos TraderPosition
+	err := s.db.
+		Where(`
+			trader_id = ? AND exchange_id = ? AND symbol = ? AND entry_time <= ? AND
+			(
+				(status = 'OPEN' AND (exit_time = 0 OR exit_time >= ?)) OR
+				(status = 'CLOSED' AND exit_time >= ?)
+			)
+		`, traderID, exchangeID, symbol, eventTimeMs, eventTimeMs, eventTimeMs).
+		Order("CASE WHEN status = 'OPEN' THEN 0 ELSE 1 END, entry_time DESC").
+		First(&pos).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			// Fallback: attach to the latest position for this symbol if time window match failed.
+			err = s.db.
+				Where("trader_id = ? AND exchange_id = ? AND symbol = ?", traderID, exchangeID, symbol).
+				Order("updated_at DESC").
+				First(&pos).Error
+		}
+		if err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return nil
+			}
+			return fmt.Errorf("failed to find position for funding fee: %w", err)
+		}
+	}
+
+	nowMs := time.Now().UTC().UnixMilli()
+	return s.db.Model(&TraderPosition{}).Where("id = ?", pos.ID).Updates(map[string]interface{}{
+		"funding_fee": pos.FundingFee + fundingFee,
+		"updated_at":  nowMs,
+	}).Error
+}
+
 // GetClosedPositions gets closed positions
 func (s *PositionStore) GetClosedPositions(traderID string, limit int) ([]*TraderPosition, error) {
 	var positions []*TraderPosition
@@ -354,15 +402,16 @@ func (s *PositionStore) GetPositionStats(traderID string) (map[string]interface{
 	stats := make(map[string]interface{})
 
 	type result struct {
-		Total    int
-		Wins     int
-		TotalPnL float64
-		TotalFee float64
+		Total           int
+		Wins            int
+		TotalPnL        float64
+		TotalFee        float64
+		TotalFundingFee float64
 	}
 	var r result
 
 	err := s.db.Model(&TraderPosition{}).
-		Select("COUNT(*) as total, SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins, COALESCE(SUM(realized_pnl), 0) as total_pnl, COALESCE(SUM(fee), 0) as total_fee").
+		Select("COUNT(*) as total, SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins, COALESCE(SUM(realized_pnl), 0) as total_pnl, COALESCE(SUM(fee), 0) as total_fee, COALESCE(SUM(funding_fee), 0) as total_funding_fee").
 		Where("trader_id = ? AND status = ?", traderID, "CLOSED").
 		Scan(&r).Error
 	if err != nil {
@@ -373,6 +422,7 @@ func (s *PositionStore) GetPositionStats(traderID string) (map[string]interface{
 	stats["win_trades"] = r.Wins
 	stats["total_pnl"] = r.TotalPnL
 	stats["total_fee"] = r.TotalFee
+	stats["total_funding_fee"] = r.TotalFundingFee
 	if r.Total > 0 {
 		stats["win_rate"] = float64(r.Wins) / float64(r.Total) * 100
 	} else {
@@ -409,6 +459,7 @@ func (s *PositionStore) GetFullStats(traderID string) (*TraderStats, error) {
 		stats.TotalTrades++
 		stats.TotalPnL += pos.RealizedPnL
 		stats.TotalFee += pos.Fee
+		stats.TotalFundingFee += pos.FundingFee
 		pnls = append(pnls, pos.RealizedPnL)
 
 		if pos.RealizedPnL > 0 {
@@ -671,8 +722,8 @@ func (s *PositionStore) GetHoldingTimeStats(traderID string) ([]HoldingTimeStats
 	}
 
 	rangeStats := map[string]*struct {
-		count   int
-		wins    int
+		count    int
+		wins     int
 		totalPnL float64
 	}{
 		"<1h":   {},
@@ -1162,4 +1213,34 @@ func (s *PositionStore) SyncClosedPositions(traderID, exchangeID, exchangeType s
 		}
 	}
 	return created, skipped, nil
+}
+
+// GetTodaySymbolPerformance calculates the net PnL and whether the latest closed position was a loss for a given symbol today.
+func (s *PositionStore) GetTodaySymbolPerformance(traderID, symbol string) (float64, bool, error) {
+	now := time.Now()
+	// Use UTC start of day to match typical exchange / system logic, or local.
+	// Since EntryTime/ExitTime are Unix milliseconds UTC, we should calculate start of today in UTC:
+	startOfDay := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+
+	var positions []TraderPosition
+	err := s.db.Where("trader_id = ? AND symbol = ? AND status = ? AND exit_time >= ?", traderID, symbol, "CLOSED", startOfDay).
+		Order("exit_time DESC").
+		Find(&positions).Error
+
+	if err != nil {
+		return 0, false, err
+	}
+
+	netProfit := 0.0
+	lastWasLoss := false
+
+	for i, pos := range positions {
+		netProfit += pos.RealizedPnL
+		if i == 0 {
+			// The first one is the most recently closed due to DESC order
+			lastWasLoss = pos.RealizedPnL < 0
+		}
+	}
+
+	return netProfit, lastWasLoss, nil
 }

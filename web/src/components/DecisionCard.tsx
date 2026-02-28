@@ -45,8 +45,15 @@ function getConfidenceColor(confidence: number | undefined): string {
 // Single Action Card Component
 function ActionCard({ action, language, onSymbolClick }: { action: DecisionAction; language: Language; onSymbolClick?: (symbol: string) => void }) {
   const config = ACTION_CONFIG[action.action] || ACTION_CONFIG.wait
-  const isLong = action.action.includes('long')
+  const isLong = action.action.includes('long') || action.action === 'hold'
   const isOpen = action.action.includes('open')
+  const isHoldWithUpdate = action.action === 'hold' && ((action.stop_loss && action.stop_loss > 0) || (action.take_profit && action.take_profit > 0))
+  const showDetails = isOpen || isHoldWithUpdate
+
+  let displayLabel = config.label
+  if (isHoldWithUpdate) {
+    displayLabel = 'HOLD (Trailing Stop-Loss)'
+  }
 
   return (
     <div
@@ -73,7 +80,7 @@ function ActionCard({ action, language, onSymbolClick }: { action: DecisionActio
             className="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider"
             style={{ background: config.bg, color: config.color, border: `1px solid ${config.color}55` }}
           >
-            {config.label}
+            {displayLabel}
           </span>
         </div>
 
@@ -98,7 +105,7 @@ function ActionCard({ action, language, onSymbolClick }: { action: DecisionActio
       </div>
 
       {/* Trading Details Grid */}
-      {isOpen && (
+      {showDetails && (
         <div className="grid grid-cols-4 gap-3 mt-3 pt-3" style={{ borderTop: '1px solid #2B3139' }}>
           {/* Entry Price */}
           <div className="text-center">
@@ -153,7 +160,7 @@ function ActionCard({ action, language, onSymbolClick }: { action: DecisionActio
       )}
 
       {/* Risk/Reward Ratio for open positions */}
-      {isOpen && action.stop_loss && action.take_profit && action.price && (
+      {showDetails && action.stop_loss && action.take_profit && action.price && (
         <div className="mt-3 pt-3 flex items-center justify-between" style={{ borderTop: '1px solid #2B3139' }}>
           <span className="text-xs" style={{ color: '#848E9C' }}>{t('riskReward', language)}</span>
           <div className="flex items-center gap-2">
@@ -374,13 +381,17 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
                       bgColor = 'rgba(246, 70, 93, 0.2)'
                       textColor = '#F6465D'
                     }
+                    let actionText = action.action?.replace('_', ' ')?.toUpperCase()
+                    if (action.action === 'hold' && ((action.stop_loss && action.stop_loss > 0) || (action.take_profit && action.take_profit > 0))) {
+                      actionText = 'HOLD (Trailing Stop)'
+                    }
                     return (
                       <span
                         key={idx}
                         className="text-xs px-1.5 py-0.5 rounded font-medium"
                         style={{ background: bgColor, color: textColor }}
                       >
-                        {action.symbol?.replace('USDT', '')} {action.action?.replace('_', ' ')}
+                        {action.symbol?.replace('USDT', '')} {actionText}
                       </span>
                     )
                   })}

@@ -170,6 +170,7 @@ func (pb *PositionBuilder) handleClose(
 			totalPnL,
 			totalFee,
 			"sync",
+			position.FundingFee, // Pass current FundingFee
 		)
 	}
 }
