@@ -166,6 +166,9 @@ type AutoTrader struct {
 	// [CIRCUIT BREAKER] Per-symbol pause (StoplossGuard / LowProfitPairs / CooldownPeriod)
 	cbSymbolPausedUntil      map[string]time.Time
 	cbSymbolPausedUntilMutex sync.RWMutex
+
+	// [TRAILING STOP] 移动止损管理器
+	trailingStopManager *TrailingStopManager
 }
 
 // NewAutoTrader creates an automatic trader
@@ -397,6 +400,8 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		symbolRiskBudgetDate: time.Now().UTC(),
 		// Circuit breaker state
 		cbSymbolPausedUntil: make(map[string]time.Time),
+		// Trailing stop manager
+		trailingStopManager: NewTrailingStopManager(&config.StrategyConfig.RiskControl),
 	}
 
 	// Initialize secondary AI client if configured
@@ -2020,6 +2025,49 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			if maxStopLoss <= 0 {
 				maxStopLoss = 3.0 // Default: -3%
 			}
+
+			// [TRAILING STOP] 更新移动止损
+			if at.trailingStopManager != nil && at.config.StrategyConfig.RiskControl.EnableTrailingStop {
+				// 获取当前止损价格（从交易所或本地记录）
+				currentStopLoss := entryPrice * (1 - maxStopLoss/100.0)
+				if side == "short" {
+					currentStopLoss = entryPrice * (1 + maxStopLoss/100.0)
+				}
+
+				// 更新移动止损
+				newStopLoss, updated, err := at.trailingStopManager.UpdateTrailingStop(
+					symbol, side, entryPrice, markPrice, currentStopLoss, leverage,
+				)
+
+				if err != nil {
+					logger.Warnf("⚠️ [Trailing Stop] 更新失败 %s %s: %v", symbol, side, err)
+				} else if updated {
+					// 止损已更新，尝试更新交易所的止损单
+					// TODO: 调用交易所 API 更新止损单
+					logger.Infof("✅ [Trailing Stop] %s %s 止损已更新至 %.4f", symbol, side, newStopLoss)
+				}
+
+				// 检查是否触发止损
+				hit, hitType := at.trailingStopManager.CheckStopLossHit(
+					symbol, side, markPrice, newStopLoss, 0, 0,
+				)
+
+				if hit {
+					logger.Infof("🚨 [%s] %s %s 触发止损 | 当前价格: %.4f | 止损价格: %.4f",
+						hitType, symbol, side, markPrice, newStopLoss)
+					if err := at.emergencyClosePosition(symbol, side); err != nil {
+						logger.Infof("❌ 移动止损平仓失败 (%s %s): %v", symbol, side, err)
+					} else {
+						logger.Infof("✅ 移动止损平仓成功: %s %s", symbol, side)
+						at.ClearPeakPnLCache(symbol, side)
+						at.trailingStopManager.ClearPosition(symbol, side)
+						at.recordSymbolClosed(symbol)
+					}
+					continue
+				}
+			}
+
+			// 原有的固定止损检查
 			if currentPnLPct < -maxStopLoss {
 				logger.Infof("🚨 [RISK CONTROL] MaxStopLoss triggered: %s %s | Loss: %.2f%% (limit: -%.1f%%)",
 					symbol, side, currentPnLPct, maxStopLoss)
@@ -2029,6 +2077,9 @@ func (at *AutoTrader) checkPositionDrawdown() {
 					logger.Infof("✅ MaxStopLoss close succeeded: %s %s", symbol, side)
 					at.ClearPeakPnLCache(symbol, side)
 					at.recordSymbolClosed(symbol) // Start cooldown after forced close
+					if at.trailingStopManager != nil {
+						at.trailingStopManager.ClearPosition(symbol, side)
+					}
 				}
 				continue
 			}

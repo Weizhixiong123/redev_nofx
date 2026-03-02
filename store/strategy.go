@@ -249,6 +249,24 @@ type RiskControlConfig struct {
 	// 当 DailyRiskBudgetPct > 0 时，此字段作为补充保险仍然生效
 	MaxTradesPerSymbolPerDay int `json:"max_trades_per_symbol_per_day"`
 
+	// === 移动止损/止盈配置 (Trailing Stop) ===
+
+	// Enable trailing stop (CODE ENFORCED, default: false)
+	// 启用移动止损功能
+	EnableTrailingStop bool `json:"enable_trailing_stop"`
+
+	// Trailing stop positive percentage (default: 0.02 means 2%)
+	// 正向止损比例：当盈利达到偏移后，使用此比例作为止损距离
+	TrailingStopPositive float64 `json:"trailing_stop_positive"`
+
+	// Trailing stop positive offset percentage (default: 0.03 means 3%)
+	// 正向止损触发偏移：盈利达到此比例后，才切换到正向止损
+	TrailingStopPositiveOffset float64 `json:"trailing_stop_positive_offset"`
+
+	// Trailing only when offset is reached (default: false)
+	// 仅在偏移达到后才开始移动止损，否则止损固定不动
+	TrailingOnlyOffsetIsReached bool `json:"trailing_only_offset_is_reached"`
+
 	// === 盈利池（Profit Pool）风控参数 ===
 
 	// DailyRiskBudgetPct: 每标的每日初始风险预算 = 账户净值 × 此比例 (CODE ENFORCED)
@@ -384,7 +402,12 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			MaxStopLossPct:           3.0, // 亏损超 3% 强制止损 (CODE ENFORCED)
 			MinTakeProfitPct:         1.5, // 至少 1.5% 盈利才止盈 (AI GUIDED)
 			SameSymbolCooldownMin:    10,  // 平仓后冷却 10 分钟 (CODE ENFORCED)
-			MaxTradesPerSymbolPerDay: 3,   // 每标的每天最多 3 次开仓 (CODE ENFORCED, 盈利池模式下作为保险)
+			MaxTradesPerSymbolPerDay: 3,   // 每标的每天最多 3 次开仓 (CODE ENFORCED)
+			// 移动止损配置 (默认禁用)
+			EnableTrailingStop:          false, // 禁用移动止损
+			TrailingStopPositive:        0.02,  // 正向止损 2%
+			TrailingStopPositiveOffset:  0.03,  // 偏移 3% 后触发
+			TrailingOnlyOffsetIsReached: false, // 立即开始移动
 			// 盈利池（Profit Pool）
 			DailyRiskBudgetPct: 0.20, // 每标的每日初始风险预算 = 净值的 20%（如 53U 账户 → 每币 10.6U）
 			ProfitReinvestRate: 0.30, // 盈利的 30% 归还预算（亏钱不补充）
