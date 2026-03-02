@@ -1244,3 +1244,66 @@ func (s *PositionStore) GetTodaySymbolPerformance(traderID, symbol string) (floa
 
 	return netProfit, lastWasLoss, nil
 }
+
+// ============================================================================
+// Circuit Breaker Query Methods
+// ============================================================================
+
+// CountStoplossesInWindow counts the number of losing positions closed within the lookback window.
+// Used by StoplossGuard circuit breaker.
+// symbol: empty string = count globally across all symbols
+func (s *PositionStore) CountStoplossesInWindow(traderID, symbol string, lookbackMin int) (int, error) {
+	since := time.Now().Add(-time.Duration(lookbackMin) * time.Minute).UnixMilli()
+	query := s.db.Model(&TraderPosition{}).
+		Where("trader_id = ? AND status = ? AND exit_time >= ? AND realized_pnl < 0",
+			traderID, "CLOSED", since)
+	if symbol != "" {
+		query = query.Where("symbol = ?", symbol)
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("CountStoplossesInWindow: %w", err)
+	}
+	return int(count), nil
+}
+
+// GetAvgPnLInWindow returns the average realized PnL (USDT) and trade count for a symbol
+// within the lookback window. Used by LowProfitPairs circuit breaker.
+func (s *PositionStore) GetAvgPnLInWindow(traderID, symbol string, lookbackMin int) (avgPnL float64, count int, err error) {
+	since := time.Now().Add(-time.Duration(lookbackMin) * time.Minute).UnixMilli()
+	type res struct {
+		AvgPnL float64
+		Count  int
+	}
+	var r res
+	e := s.db.Model(&TraderPosition{}).
+		Select("COALESCE(AVG(realized_pnl), 0) as avg_pnl, COUNT(*) as count").
+		Where("trader_id = ? AND symbol = ? AND status = ? AND exit_time >= ?",
+			traderID, symbol, "CLOSED", since).
+		Scan(&r).Error
+	if e != nil {
+		return 0, 0, fmt.Errorf("GetAvgPnLInWindow: %w", e)
+	}
+	return r.AvgPnL, r.Count, nil
+}
+
+// GetMaxDrawdownPct calculates the current max drawdown percentage from all closed positions.
+// Used by MaxDrawdownProtection circuit breaker.
+func (s *PositionStore) GetMaxDrawdownPct(traderID string) (float64, error) {
+	var positions []TraderPosition
+	err := s.db.Where("trader_id = ? AND status = ?", traderID, "CLOSED").
+		Order("exit_time ASC").
+		Select("realized_pnl").
+		Find(&positions).Error
+	if err != nil {
+		return 0, fmt.Errorf("GetMaxDrawdownPct: %w", err)
+	}
+	if len(positions) == 0 {
+		return 0, nil
+	}
+	pnls := make([]float64, len(positions))
+	for i, p := range positions {
+		pnls[i] = p.RealizedPnL
+	}
+	return calculateMaxDrawdownFromPnls(pnls), nil
+}

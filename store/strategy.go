@@ -46,6 +46,8 @@ type StrategyConfig struct {
 	CustomPrompt string `json:"custom_prompt,omitempty"`
 	// risk control configuration
 	RiskControl RiskControlConfig `json:"risk_control"`
+	// circuit breaker configuration
+	CircuitBreakers CircuitBreakerConfig `json:"circuit_breakers"`
 	// editable sections of System Prompt
 	PromptSections PromptSectionsConfig `json:"prompt_sections,omitempty"`
 
@@ -259,6 +261,40 @@ type RiskControlConfig struct {
 	ProfitReinvestRate float64 `json:"profit_reinvest_rate"`
 }
 
+// CircuitBreakerConfig circuit breaker configuration
+// 熔断机制配置：当市场条件不适合时自动暂停开仓
+type CircuitBreakerConfig struct {
+	// === 1. StoplossGuard（止损熔断）===
+	// 指定时间窗口内止损次数达到阈值，暂停该交易对开仓
+	StoplossGuardEnabled    bool `json:"stoploss_guard_enabled"`
+	StoplossGuardLookback   int  `json:"stoploss_guard_lookback_min"` // 回看时间窗口（分钟），default: 60
+	StoplossGuardCount      int  `json:"stoploss_guard_count"`        // 止损次数阈值，default: 2
+	StoplossGuardTradeLimit int  `json:"stoploss_guard_trade_limit"`  // 最少样本数，default: 1
+	StoplossGuardDuration   int  `json:"stoploss_guard_duration_min"` // 熔断时长（分钟），default: 60
+	StoplossGuardGlobal     bool `json:"stoploss_guard_global"`       // true=全局熔断，false=仅针对该交易对
+
+	// === 2. MaxDrawdownProtection（最大回撤熔断）===
+	// 累计最大回撤超过阈值，全局暂停开仓
+	MaxDrawdownEnabled  bool    `json:"max_drawdown_enabled"`
+	MaxDrawdownPct      float64 `json:"max_drawdown_pct"`          // 最大回撤比例（%），default: 20.0
+	MaxDrawdownDuration int     `json:"max_drawdown_duration_min"` // 熔断时长（分钟），default: 240
+
+	// === 3. LowProfitPairs（低盈利熔断）===
+	// 指定交易对在时间窗口内均盈利率低于阈值，暂停该交易对
+	LowProfitEnabled    bool    `json:"low_profit_enabled"`
+	LowProfitLookback   int     `json:"low_profit_lookback_min"` // 回看时间窗口（分钟），default: 1440（24h）
+	LowProfitTradeLimit int     `json:"low_profit_trade_limit"`  // 最少样本数，default: 3
+	LowProfitMinAvgPct  float64 `json:"low_profit_min_avg_pct"`  // 平均盈利率下限（USDT），default: -0.5
+	LowProfitDuration   int     `json:"low_profit_duration_min"` // 熔断时长（分钟），default: 120
+
+	// === 4. CooldownPeriod（冷却期）===
+	// 每次交易完成后，自动锁定该交易对一段时间
+	// 注意：与 RiskControl.SameSymbolCooldownMin 作用相同，此处提供统一管理入口
+	// 建议只使用其中一个，两个同时启用则取较大值
+	CooldownEnabled  bool `json:"cooldown_enabled"`
+	CooldownDuration int  `json:"cooldown_duration_min"` // 冷却时长（分钟），default: 30
+}
+
 // NewStrategyStore creates a new StrategyStore
 func NewStrategyStore(db *gorm.DB) *StrategyStore {
 	return &StrategyStore{db: db}
@@ -353,6 +389,28 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			DailyRiskBudgetPct: 0.20, // 每标的每日初始风险预算 = 净值的 20%（如 53U 账户 → 每币 10.6U）
 			ProfitReinvestRate: 0.30, // 盈利的 30% 归还预算（亏钱不补充）
 		},
+		CircuitBreakers: CircuitBreakerConfig{
+			// 1. StoplossGuard：60分钟内止损2次 → 熔断60分钟
+			StoplossGuardEnabled:    true,
+			StoplossGuardLookback:   60,
+			StoplossGuardCount:      2,
+			StoplossGuardTradeLimit: 1,
+			StoplossGuardDuration:   60,
+			StoplossGuardGlobal:     false,
+			// 2. MaxDrawdownProtection：最大回撤达20% → 全局熔断4小时
+			MaxDrawdownEnabled:  true,
+			MaxDrawdownPct:      20.0,
+			MaxDrawdownDuration: 240,
+			// 3. LowProfitPairs：24小时内≥3笔，均亏损<-0.5U → 熔断2小时
+			LowProfitEnabled:    true,
+			LowProfitLookback:   1440,
+			LowProfitTradeLimit: 3,
+			LowProfitMinAvgPct:  -0.5,
+			LowProfitDuration:   120,
+			// 4. CooldownPeriod：默认关闭，由RiskControl.SameSymbolCooldownMin统一控制
+			CooldownEnabled:  false,
+			CooldownDuration: 30,
+		},
 	}
 
 	if lang == "zh" {
@@ -368,7 +426,13 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 如果你发现自己每个周期都在交易 → 标准太低；如果持仓不到30分钟就平仓 → 太冲动。`,
 			EntryStandards: `# 🎯 入场标准（严格）
 
-只在多个信号共振时入场。自由使用任何有效的分析方法，避免单一指标、信号矛盾、横盘震荡、或平仓后立即重新开仓等低质量行为。`,
+只在多个信号共振时入场。自由使用任何有效的分析方法，避免单一指标、信号矛盾、横盘震荡、或平仓后立即重新开仓等低质量行为。
+
+**🚫 禁止区间内震荡开单（最重要规则）**
+- 开仓前必须先识别近期价格区间：观察最近 20-30 根K线的高点和低点，确定震荡上轨和下轨
+- **只有价格明确突破区间**（收盘价站稳区间边界之外 + 成交量放大）才允许顺势开仓
+- **区间内的小反弹、小回调一律不开单**，即使短期看起来有机会也不开
+- 判断依据：如果最近价格一直在某个窄幅区间来回震荡（如 ±5% 内），说明还在震荡，等突破再说`,
 			DecisionProcess: `# 📋 决策流程
 
 1. 检查持仓 → 是否止盈/止损
@@ -388,7 +452,13 @@ Your task is to make trading decisions based on the provided market data. You ar
 If you find yourself trading every cycle → standards are too low; if closing positions in <30 minutes → too impulsive.`,
 			EntryStandards: `# 🎯 Entry Standards (Strict)
 
-Only enter positions when multiple signals resonate. Freely use any effective analysis methods, avoid low-quality behaviors such as single indicators, contradictory signals, sideways oscillation, or immediately restarting after closing positions.`,
+Only enter positions when multiple signals resonate. Freely use any effective analysis methods, avoid low-quality behaviors such as single indicators, contradictory signals, sideways oscillation, or immediately restarting after closing positions.
+
+**🚫 NEVER trade bounces inside a consolidation range (Most Important Rule)**
+- Before opening any position, identify the recent price range: look at the high and low of the last 20-30 candles to define the oscillation ceiling and floor
+- **Only open positions when price clearly BREAKS OUT of the range** (closing price confirmed beyond range boundary + volume surge)
+- **Small bounces or pullbacks WITHIN the range are NOT tradeable** — do not open even if it looks tempting
+- How to judge: if price has been bouncing within a narrow band (e.g., within ±5%) recently, it is still oscillating — wait for the breakout`,
 			DecisionProcess: `# 📋 Decision Process
 
 1. Check positions → whether to take profit/stop loss

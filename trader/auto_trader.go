@@ -159,6 +159,13 @@ type AutoTrader struct {
 	symbolRiskBudget      map[string]float64 // remaining risk budget per symbol (USDT)
 	symbolRiskBudgetDate  time.Time          // UTC date of last reset
 	symbolRiskBudgetMutex sync.RWMutex
+
+	// [CIRCUIT BREAKER] Global pause (MaxDrawdownProtection)
+	cbGlobalPausedUntil time.Time
+
+	// [CIRCUIT BREAKER] Per-symbol pause (StoplossGuard / LowProfitPairs / CooldownPeriod)
+	cbSymbolPausedUntil      map[string]time.Time
+	cbSymbolPausedUntilMutex sync.RWMutex
 }
 
 // NewAutoTrader creates an automatic trader
@@ -388,6 +395,8 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		// Profit pool
 		symbolRiskBudget:     make(map[string]float64),
 		symbolRiskBudgetDate: time.Now().UTC(),
+		// Circuit breaker state
+		cbSymbolPausedUntil: make(map[string]time.Time),
 	}
 
 	// Initialize secondary AI client if configured
@@ -1158,6 +1167,12 @@ func (at *AutoTrader) ExecuteDecision(d *kernel.Decision) error {
 func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
 	logger.Infof("  📈 Open long: %s", decision.Symbol)
 
+	// [CIRCUIT BREAKER] Check all circuit breakers before opening
+	if blocked, reason := at.checkCircuitBreakers(decision.Symbol, "open_long"); blocked {
+		logger.Infof("⛔ [CB] Open long BLOCKED (%s): %s", decision.Symbol, reason)
+		return fmt.Errorf("circuit breaker: %s", reason)
+	}
+
 	// ⚠️ Get current positions for multiple checks
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -1292,6 +1307,12 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 // executeOpenShortWithRecord executes open short position and records detailed information
 func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, actionRecord *store.DecisionAction) error {
 	logger.Infof("  📉 Open short: %s", decision.Symbol)
+
+	// [CIRCUIT BREAKER] Check all circuit breakers before opening
+	if blocked, reason := at.checkCircuitBreakers(decision.Symbol, "open_short"); blocked {
+		logger.Infof("⛔ [CB] Open short BLOCKED (%s): %s", decision.Symbol, reason)
+		return fmt.Errorf("circuit breaker: %s", reason)
+	}
 
 	// ⚠️ Get current positions for multiple checks
 	positions, err := at.trader.GetPositions()
@@ -1493,6 +1514,9 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *kernel.Decision, acti
 		at.replenishRiskBudget(decision.Symbol, estimatedPnL)
 	}
 
+	// [CIRCUIT BREAKER] Record close for CooldownPeriod
+	at.cbRecordTradeClosed(decision.Symbol)
+
 	logger.Infof("  ✓ Position closed successfully")
 	return nil
 }
@@ -1565,6 +1589,9 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *kernel.Decision, act
 		estimatedPnL := (entryPrice - marketData.CurrentPrice) * quantity // short: profit when price drops
 		at.replenishRiskBudget(decision.Symbol, estimatedPnL)
 	}
+
+	// [CIRCUIT BREAKER] Record close for CooldownPeriod
+	at.cbRecordTradeClosed(decision.Symbol)
 
 	logger.Infof("  ✓ Position closed successfully")
 	return nil
@@ -1947,17 +1974,21 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			quantity = -quantity // Short position quantity is negative, convert to positive
 		}
 
-		// Calculate current P&L percentage
+		// Calculate leverage for drawdown trailing-stop (still needed for peakPnL tracking)
 		leverage := 10 // Default value
 		if lev, ok := pos["leverage"].(float64); ok {
 			leverage = int(lev)
 		}
+		_ = leverage // leverage retained for future use in trailing-stop threshold scaling
 
+		// Calculate current P&L as plain PRICE-CHANGE percentage (no leverage multiplier).
+		// MaxStopLossPct is defined as "stop_loss within X% of entry price" (same as shown to AI),
+		// so we must compare against price movement, not the leveraged return.
 		var currentPnLPct float64
 		if side == "long" {
-			currentPnLPct = ((markPrice - entryPrice) / entryPrice) * float64(leverage) * 100
+			currentPnLPct = ((markPrice - entryPrice) / entryPrice) * 100
 		} else {
-			currentPnLPct = ((entryPrice - markPrice) / entryPrice) * float64(leverage) * 100
+			currentPnLPct = ((entryPrice - markPrice) / entryPrice) * 100
 		}
 
 		// Construct unique position identifier (distinguish long/short)
@@ -2003,8 +2034,9 @@ func (at *AutoTrader) checkPositionDrawdown() {
 			}
 		}
 
-		// Check close position condition: profit > 5% and drawdown >= 40%
-		if currentPnLPct > 5.0 && drawdownPct >= 40.0 {
+		// Check close position condition: profit > 2% and drawdown >= 40%
+		// Changed from 5% to 2% to protect smaller profits seen in typical trades
+		if currentPnLPct > 2.0 && drawdownPct >= 40.0 {
 			logger.Infof("🚨 Drawdown close position condition triggered: %s %s | Current profit: %.2f%% | Peak profit: %.2f%% | Drawdown: %.2f%%",
 				symbol, side, currentPnLPct, peakPnLPct, drawdownPct)
 
@@ -2016,7 +2048,7 @@ func (at *AutoTrader) checkPositionDrawdown() {
 				// Clear cache for this position after closing
 				at.ClearPeakPnLCache(symbol, side)
 			}
-		} else if currentPnLPct > 5.0 {
+		} else if currentPnLPct > 2.0 {
 			// Record situations close to close position condition (for debugging)
 			logger.Infof("📊 Drawdown monitoring: %s %s | Profit: %.2f%% | Peak: %.2f%% | Drawdown: %.2f%%",
 				symbol, side, currentPnLPct, peakPnLPct, drawdownPct)
@@ -2044,6 +2076,142 @@ func (at *AutoTrader) emergencyClosePosition(symbol, side string) error {
 	}
 
 	return nil
+}
+
+// ============================================================================
+// Circuit Breaker
+// ============================================================================
+
+// cbSetSymbolPause sets a per-symbol circuit breaker pause.
+func (at *AutoTrader) cbSetSymbolPause(symbol string, until time.Time) {
+	at.cbSymbolPausedUntilMutex.Lock()
+	defer at.cbSymbolPausedUntilMutex.Unlock()
+	if existing, ok := at.cbSymbolPausedUntil[symbol]; !ok || until.After(existing) {
+		at.cbSymbolPausedUntil[symbol] = until
+	}
+}
+
+// cbIsSymbolPaused returns (paused, remaining) for a circuit breaker key.
+func (at *AutoTrader) cbIsSymbolPaused(key string) (bool, time.Duration) {
+	at.cbSymbolPausedUntilMutex.RLock()
+	defer at.cbSymbolPausedUntilMutex.RUnlock()
+	until, ok := at.cbSymbolPausedUntil[key]
+	if !ok || time.Now().After(until) {
+		return false, 0
+	}
+	return true, time.Until(until)
+}
+
+// checkCircuitBreakers evaluates all enabled circuit breakers before allowing an open-position action.
+// Returns (blocked bool, reason string).
+func (at *AutoTrader) checkCircuitBreakers(symbol, action string) (bool, string) {
+	if at.store == nil || at.config.StrategyConfig == nil {
+		return false, ""
+	}
+	cb := at.config.StrategyConfig.CircuitBreakers
+
+	// ── 4. CooldownPeriod ────────────────────────────────────────────────────
+	if cb.CooldownEnabled && cb.CooldownDuration > 0 {
+		if paused, remaining := at.cbIsSymbolPaused(symbol + "_cooldown"); paused {
+			return true, fmt.Sprintf("CooldownPeriod: %s cooldown %.0f min remaining", symbol, remaining.Minutes())
+		}
+	}
+
+	// ── 1. StoplossGuard ─────────────────────────────────────────────────────
+	if cb.StoplossGuardEnabled && cb.StoplossGuardCount > 0 {
+		pauseKey := symbol + "_stoploss"
+		if cb.StoplossGuardGlobal {
+			pauseKey = "_global_stoploss"
+		}
+		if paused, remaining := at.cbIsSymbolPaused(pauseKey); paused {
+			return true, fmt.Sprintf("StoplossGuard: blocked %.0f min remaining", remaining.Minutes())
+		}
+		lookback := cb.StoplossGuardLookback
+		if lookback <= 0 {
+			lookback = 60
+		}
+		querySym := symbol
+		if cb.StoplossGuardGlobal {
+			querySym = ""
+		}
+		count, err := at.store.Position().CountStoplossesInWindow(at.id, querySym, lookback)
+		if err == nil && count >= cb.StoplossGuardCount {
+			duration := cb.StoplossGuardDuration
+			if duration <= 0 {
+				duration = 60
+			}
+			until := time.Now().Add(time.Duration(duration) * time.Minute)
+			at.cbSetSymbolPause(pauseKey, until)
+			reason := fmt.Sprintf("🛑 [CB] StoplossGuard: %d losses in %d min → block %d min", count, lookback, duration)
+			logger.Infof("%s (%s)", reason, symbol)
+			return true, reason
+		}
+	}
+
+	// ── 2. MaxDrawdownProtection ─────────────────────────────────────────────
+	if cb.MaxDrawdownEnabled && cb.MaxDrawdownPct > 0 {
+		if paused, remaining := at.cbIsSymbolPaused("_global_drawdown"); paused {
+			return true, fmt.Sprintf("MaxDrawdownProtection: global block %.0f min remaining", remaining.Minutes())
+		}
+		drawdown, err := at.store.Position().GetMaxDrawdownPct(at.id)
+		if err == nil && drawdown >= cb.MaxDrawdownPct {
+			duration := cb.MaxDrawdownDuration
+			if duration <= 0 {
+				duration = 240
+			}
+			until := time.Now().Add(time.Duration(duration) * time.Minute)
+			at.cbSetSymbolPause("_global_drawdown", until)
+			reason := fmt.Sprintf("🛑 [CB] MaxDrawdownProtection: drawdown %.1f%% ≥ %.1f%% → global block %d min",
+				drawdown, cb.MaxDrawdownPct, duration)
+			logger.Infof("%s", reason)
+			return true, reason
+		}
+	}
+
+	// ── 3. LowProfitPairs ────────────────────────────────────────────────────
+	if cb.LowProfitEnabled {
+		pauseKey := symbol + "_lowprofit"
+		if paused, remaining := at.cbIsSymbolPaused(pauseKey); paused {
+			return true, fmt.Sprintf("LowProfitPairs: %s blocked %.0f min remaining", symbol, remaining.Minutes())
+		}
+		lookback := cb.LowProfitLookback
+		if lookback <= 0 {
+			lookback = 1440
+		}
+		tradeLimit := cb.LowProfitTradeLimit
+		if tradeLimit <= 0 {
+			tradeLimit = 3
+		}
+		avgPnL, trCount, err := at.store.Position().GetAvgPnLInWindow(at.id, symbol, lookback)
+		if err == nil && trCount >= tradeLimit && avgPnL < cb.LowProfitMinAvgPct {
+			duration := cb.LowProfitDuration
+			if duration <= 0 {
+				duration = 120
+			}
+			until := time.Now().Add(time.Duration(duration) * time.Minute)
+			at.cbSetSymbolPause(pauseKey, until)
+			reason := fmt.Sprintf("🛑 [CB] LowProfitPairs: %s avgPnL=%.2f U / %d trades → block %d min",
+				symbol, avgPnL, trCount, duration)
+			logger.Infof("%s", reason)
+			return true, reason
+		}
+	}
+
+	return false, ""
+}
+
+// cbRecordTradeClosed is called after any position is closed to trigger CooldownPeriod.
+func (at *AutoTrader) cbRecordTradeClosed(symbol string) {
+	if at.config.StrategyConfig == nil {
+		return
+	}
+	cb := at.config.StrategyConfig.CircuitBreakers
+	if !cb.CooldownEnabled || cb.CooldownDuration <= 0 {
+		return
+	}
+	until := time.Now().Add(time.Duration(cb.CooldownDuration) * time.Minute)
+	at.cbSetSymbolPause(symbol+"_cooldown", until)
+	logger.Infof("⏸ [CB] CooldownPeriod: %s locked for %d minutes", symbol, cb.CooldownDuration)
 }
 
 // GetPeakPnLCache gets peak profit cache
