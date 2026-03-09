@@ -2301,14 +2301,12 @@ func parseReviewResponse(rawResponse string, openDecisions []Decision) ([]Decisi
 					logs = append(logs, fmt.Sprintf("[%s] ✅ APPROVED by reviewer (lenient parse)", d.Symbol))
 					approved = append(approved, d)
 				} else {
-					// Can't determine, default to approve (trust primary)
-					logs = append(logs, fmt.Sprintf("[%s] ⚠️ Review unclear, defaulting to APPROVE", d.Symbol))
-					approved = append(approved, d)
+					// Can't determine, MUST default to reject to ensure safety
+					logs = append(logs, fmt.Sprintf("[%s] ⚠️ Review unclear, defaulting to REJECT (Fail-Safe)", d.Symbol))
 				}
 			} else {
-				// Symbol not mentioned in review, default to approve
-				logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not mentioned in review, defaulting to APPROVE", d.Symbol))
-				approved = append(approved, d)
+				// Symbol not mentioned in review, default to reject
+				logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not mentioned in review, defaulting to REJECT (Fail-Safe)", d.Symbol))
 			}
 		}
 		return approved, logs
@@ -2334,9 +2332,8 @@ func parseReviewResponse(rawResponse string, openDecisions []Decision) ([]Decisi
 		}
 
 		if !found {
-			// Not reviewed, default to approve (trust primary)
-			logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not in review response, defaulting to APPROVE", d.Symbol))
-			approved = append(approved, d)
+			// Not reviewed, default to reject
+			logs = append(logs, fmt.Sprintf("[%s] ⚠️ Not in review response, defaulting to REJECT (Fail-Safe)", d.Symbol))
 			continue
 		}
 
