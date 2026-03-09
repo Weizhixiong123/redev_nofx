@@ -2222,8 +2222,8 @@ func buildReviewPrompt(openDecisions []Decision, ctx *Context) string {
 					}
 				} else {
 					// Fallback to basic RSI if TimeframeData is missing
-					if mData.RSI != nil && mData.RSI.Latest > 0 {
-						sb.WriteString(fmt.Sprintf("- RSI当前值: %.2f\n", mData.RSI.Latest))
+					if mData.CurrentRSI7 > 0 {
+						sb.WriteString(fmt.Sprintf("- RSI7当前值: %.2f\n", mData.CurrentRSI7))
 					}
 				}
 
