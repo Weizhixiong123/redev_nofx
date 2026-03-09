@@ -1153,7 +1153,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 	}
 
 	// [CODE ENFORCED] Volatility / Sideways market filter
-	if err := at.enforceVolatility(decision.Symbol, ctx.MarketDataMap); err != nil {
+	if err := at.enforceVolatility(decision.Symbol, nil); err != nil {
 		return err
 	}
 
@@ -2447,13 +2447,22 @@ func (at *AutoTrader) enforceVolatility(symbol string, marketData map[string]*ma
 		return nil // Volatility filter disabled
 	}
 
-	if marketData == nil {
-		return nil
+	var mData *market.Data
+
+	if marketData != nil {
+		md, ok := marketData[symbol]
+		if ok && md != nil {
+			mData = md
+		}
 	}
 
-	mData, ok := marketData[symbol]
-	if !ok || mData == nil || mData.CurrentPrice <= 0 {
-		return nil // Cannot check without data
+	// If no market data passed in, fetch it ourselves
+	if mData == nil {
+		fetchedData, err := market.GetWithExchange(symbol, at.exchange)
+		if err != nil || fetchedData == nil || fetchedData.CurrentPrice <= 0 {
+			return nil // Cannot check without data, allow trade
+		}
+		mData = fetchedData
 	}
 
 	// Try to get ATR from Multi-timeframe data (prefer 15m or 1h for volatility check)
