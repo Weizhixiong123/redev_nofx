@@ -2227,14 +2227,12 @@ func buildReviewPrompt(openDecisions []Decision, ctx *Context) string {
 					}
 				}
 
-				if mData.OpenInterest != nil {
-					sb.WriteString(fmt.Sprintf("- 1h持仓量变化: %.2f%%\n", mData.OpenInterest.Change1h))
+				if mData.OpenInterest != nil && mData.OpenInterest.Average > 0 {
+					oiChange := ((mData.OpenInterest.Latest - mData.OpenInterest.Average) / mData.OpenInterest.Average) * 100
+					sb.WriteString(fmt.Sprintf("- 持仓量(OI): 当前 %.0f, 均值 %.0f, 变化 %.2f%%\n", mData.OpenInterest.Latest, mData.OpenInterest.Average, oiChange))
 				}
-				if mData.FundingRate != nil {
-					sb.WriteString(fmt.Sprintf("- 当前资金费率: %.4f%%\n", mData.FundingRate.Value*100))
-				}
-				if mData.QuantData != nil && mData.QuantData.NetFlow != nil {
-					sb.WriteString(fmt.Sprintf("- 4h资金净流入: %.2f 万\n", mData.QuantData.NetFlow.Flow4h))
+				if mData.FundingRate != 0 {
+					sb.WriteString(fmt.Sprintf("- 当前资金费率: %.4f%%\n", mData.FundingRate*100))
 				}
 			}
 		}
