@@ -336,7 +336,7 @@ func GetFullDecisionWithStrategy(ctx *Context, mcpClient mcp.AIClient, engine *S
 		if len(openDecisions) > 0 {
 			// Build review prompt for secondary AI
 			reviewPrompt := buildReviewPrompt(openDecisions, ctx)
-			reviewSystemPrompt := buildReviewSystemPrompt()
+			reviewSystemPrompt := buildReviewSystemPrompt(engine.GetConfig())
 
 			logger.Infof("🔍 Sending %d opening decisions to Secondary AI for review...", len(openDecisions))
 			reviewStart := time.Now()
@@ -2074,8 +2074,18 @@ func detectLanguage(text string) Language {
 
 // arbitrateDecisions merges decisions from two models using conservative consensus
 // buildReviewSystemPrompt builds a system prompt for the secondary AI acting as a trade reviewer
-func buildReviewSystemPrompt() string {
-	return `你是一位专业的加密货币交易风控审查官和交易优化师。你的职责是审查主AI提出的交易建议，你不仅可以批准或否决，还可以主动优化交易参数。
+func buildReviewSystemPrompt(config *store.StrategyConfig) string {
+	var minRR float64 = 1.5
+	var maxLev int = 5
+
+	if config != nil && config.RiskControl.MinRiskRewardRatio > 0 {
+		minRR = config.RiskControl.MinRiskRewardRatio
+	}
+	if config != nil && config.RiskControl.AltcoinMaxLeverage > 0 {
+		maxLev = config.RiskControl.AltcoinMaxLeverage
+	}
+
+	return fmt.Sprintf(`你是一位专业的加密货币交易风控审查官和交易优化师。你的职责是审查主AI提出的交易建议，你不仅可以批准或否决，还可以主动优化交易参数。
 
 重要概念：
 - "仓位"（position_size_usd）= 名义价值（notional value），不是保证金
@@ -2084,20 +2094,21 @@ func buildReviewSystemPrompt() string {
 
 | 审查项 | APPROVE条件 | REJECT/MODIFY条件 |
 |--------|-----------|-----------|
-| 风报比 | ≥ 1.5     | < 1.5     |
-| 1h涨跌幅| ≤ 10%     | > 15%     |
-| 4h涨跌幅| ≤ 30%     | > 50%     |
-| 杠杆   | ≤ 5x      | > 10x     |
+| 风报比 | ≥ %.2f     | < %.2f     |
+| 1h涨跌幅| ≤ 10%%     | > 15%%     |
+| 4h涨跌幅| ≤ 30%%     | > 50%%     |
+| 杠杆   | ≤ %dx      | > %dx     |
+（备注：根据当前策略风控配置自动生成）
 
-注意：10%-15%的1h涨幅处于灰色地带，需结合其他因素（如关键阻力位、市场趋势）综合判断。
+注意：10%%-15%%的1h涨幅处于灰色地带，需结合其他因素（如关键阻力位、市场趋势）综合判断。如果主AI提供的理由（如RSI或持仓量）充分，可以放宽放行。
 
 风报比计算公式（非常重要，不要算反！）：
 - 做多: 风报比 = |止盈 - 入场价| / |入场价 - 止损|
 - 做空: 风报比 = |入场价 - 止盈| / |止损 - 入场价|
 - 分子是潜在盈利，分母是潜在亏损
-- 例: 入场100, 止损95, 止盈115 → 风报比 = 15/5 = 3.0 ✅
 
-除了 APPROVE 或 REJECT，如果你认为主AI看对了方向，但参数（止损、止盈、杠杆）设置得不合理（如风报比低于1.5，或杠杆过高），你应当使用 "MODIFY" 判定，并给出你优化后的参数以拯救这笔交易。
+除了 APPROVE 或 REJECT，如果你认为主AI看对了方向，但参数（止损、止盈、杠杆）违规或不合理，你应当使用 "MODIFY" 判定，拯救这笔交易。
+如果因为拉远了止损，你必须确保按比例调小 "position_size_usd" 的值，以维持风险敞口不变！
 
 请对每笔交易回复以下JSON格式：
 {
@@ -2105,21 +2116,17 @@ func buildReviewSystemPrompt() string {
     {
       "symbol": "BTCUSDT",
       "verdict": "APPROVE",
-      "reason": "风报比2.5（>1.5），1h涨幅3%（<10%），未追高，逻辑清晰。"
-    },
-    {
-      "symbol": "ETHUSDT", 
-      "verdict": "REJECT",
-      "reason": "1h涨幅18%（>15%），属于短线极端暴涨，追高风险极大。"
+      "reason": "指标健康，风报比达到标准条件。"
     },
     {
       "symbol": "SOLUSDT", 
       "verdict": "MODIFY",
-      "reason": "方向正确，但原止损设置过近容易被打掉，且风报比仅1.2。将其止损拉远至支撑位125，止盈上调至150，将风报比优化至2.0",
+      "reason": "方向正确，但原止损过近易被打断，修改止损至125。为保持风险一致，对应调减了position_size_usd。",
       "modified_params": {
         "stop_loss": 125.00,
         "take_profit": 150.00,
-        "leverage": 3
+        "leverage": 3,
+        "position_size_usd": 150.0
       }
     }
   ]
@@ -2127,10 +2134,7 @@ func buildReviewSystemPrompt() string {
 
 重要规则：
 - verdict 只能是 "APPROVE", "REJECT", 或 "MODIFY"
-- 每个symbol必须给出明确判定
-- 当 verdict 为 "MODIFY" 时，必须同时提供 modified_params（可包含 stop_loss, take_profit, leverage, position_size_usd）
-- 当所有量化指标都在APPROVE范围内时，应该直接给出APPROVE
-- 回复必须包含有效的JSON`
+- 返回的必须包含有效的JSON`, minRR, minRR, maxLev, maxLev)
 }
 
 // buildReviewPrompt builds a user prompt for the secondary AI to review primary's decisions
@@ -2191,6 +2195,46 @@ func buildReviewPrompt(openDecisions []Decision, ctx *Context) string {
 				}
 				if mData.PriceChange4h != 0 {
 					sb.WriteString(fmt.Sprintf("- 4h涨跌幅: %.2f%%\n", mData.PriceChange4h))
+				}
+				
+				// Iterate over timeframes if available to give deeper context
+				if mData.TimeframeData != nil && len(mData.TimeframeData) > 0 {
+					sb.WriteString("- 多周期技术指标:\n")
+					
+					// Sort timeframes logically if needed, or just iterate (usually contains 15m, 1h, 4h etc.)
+					for tf, tfData := range mData.TimeframeData {
+						var rsiStr string
+						if len(tfData.RSI14Values) > 0 {
+							rsiStr = fmt.Sprintf("RSI: %.2f", tfData.RSI14Values[len(tfData.RSI14Values)-1])
+						}
+						
+						var emaStr string
+						if len(tfData.EMA20Values) > 0 && len(tfData.Klines) > 0 {
+							lastPrice := tfData.Klines[len(tfData.Klines)-1].Close
+							lastEma := tfData.EMA20Values[len(tfData.EMA20Values)-1]
+							diffPct := ((lastPrice - lastEma) / lastEma) * 100
+							emaStr = fmt.Sprintf("偏离EMA20: %.2f%%", diffPct)
+						}
+						
+						if rsiStr != "" || emaStr != "" {
+							sb.WriteString(fmt.Sprintf("  - [%s]: %s, %s\n", tf, rsiStr, emaStr))
+						}
+					}
+				} else {
+					// Fallback to basic RSI if TimeframeData is missing
+					if mData.RSI != nil && mData.RSI.Latest > 0 {
+						sb.WriteString(fmt.Sprintf("- RSI当前值: %.2f\n", mData.RSI.Latest))
+					}
+				}
+
+				if mData.OpenInterest != nil {
+					sb.WriteString(fmt.Sprintf("- 1h持仓量变化: %.2f%%\n", mData.OpenInterest.Change1h))
+				}
+				if mData.FundingRate != nil {
+					sb.WriteString(fmt.Sprintf("- 当前资金费率: %.4f%%\n", mData.FundingRate.Value*100))
+				}
+				if mData.QuantData != nil && mData.QuantData.NetFlow != nil {
+					sb.WriteString(fmt.Sprintf("- 4h资金净流入: %.2f 万\n", mData.QuantData.NetFlow.Flow4h))
 				}
 			}
 		}

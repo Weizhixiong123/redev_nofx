@@ -1147,6 +1147,16 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *kernel.Decision, actio
 		return err
 	}
 
+	// [CODE ENFORCED] Check cooldown period after stop-loss
+	if err := at.enforceCooldown(decision.Symbol); err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Volatility / Sideways market filter
+	if err := at.enforceVolatility(decision.Symbol, ctx.MarketDataMap); err != nil {
+		return err
+	}
+
 	// Check if there's already a position in the same symbol and direction
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
@@ -1261,6 +1271,11 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *kernel.Decision, acti
 
 	// [CODE ENFORCED] Check max positions limit
 	if err := at.enforceMaxPositions(len(positions)); err != nil {
+		return err
+	}
+
+	// [CODE ENFORCED] Check cooldown period after stop-loss
+	if err := at.enforceCooldown(decision.Symbol); err != nil {
 		return err
 	}
 
@@ -2354,6 +2369,129 @@ func (at *AutoTrader) enforceMaxPositions(currentPositionCount int) error {
 	if currentPositionCount >= maxPositions {
 		return fmt.Errorf("❌ [RISK CONTROL] Already at max positions (%d/%d)", currentPositionCount, maxPositions)
 	}
+	return nil
+}
+
+// enforceCooldown checks if a symbol is in cooldown period after a stop-loss (CODE ENFORCED)
+// If the last closed position for this symbol was a loss AND within cooldown_minutes, block new entry.
+func (at *AutoTrader) enforceCooldown(symbol string) error {
+	if at.config.StrategyConfig == nil {
+		return nil
+	}
+
+	cooldownMinutes := at.config.StrategyConfig.RiskControl.CooldownMinutes
+	if cooldownMinutes <= 0 {
+		return nil // Cooldown disabled
+	}
+
+	if at.store == nil {
+		return nil
+	}
+
+	// Check recent 20 trades for this symbol's last result
+	recentTrades, err := at.store.Position().GetRecentTrades(at.id, 20)
+	if err != nil {
+		logger.Infof("⚠️ [%s] Cooldown check: failed to get recent trades: %v (allowing trade)", at.name, err)
+		return nil // Fail open: allow trade if we can't check
+	}
+
+	normalizedSymbol := market.Normalize(symbol)
+	for _, trade := range recentTrades {
+		if market.Normalize(trade.Symbol) != normalizedSymbol {
+			continue
+		}
+
+		// Found the last trade for this symbol
+		if trade.RealizedPnL >= 0 {
+			// Last trade was profitable (or breakeven) — no cooldown needed
+			return nil
+		}
+
+		// Last trade was a loss — check if still within cooldown window
+		if trade.ExitTime <= 0 {
+			return nil // No exit time recorded, allow trade
+		}
+
+		// ExitTime is Unix seconds (converted from ms in GetRecentTrades)
+		exitTime := time.Unix(trade.ExitTime, 0)
+		elapsed := time.Since(exitTime)
+		cooldown := time.Duration(cooldownMinutes) * time.Minute
+
+		if elapsed < cooldown {
+			remaining := cooldown - elapsed
+			logger.Infof("🛑 [RISK CONTROL] %s cooldown active: last trade lost %.4f USDT, %.0f min remaining (cooldown=%d min)",
+				symbol, trade.RealizedPnL, remaining.Minutes(), cooldownMinutes)
+			return fmt.Errorf("❌ [RISK CONTROL] %s in cooldown after stop-loss (%.0f min remaining, set cooldown_minutes=%d)",
+				symbol, remaining.Minutes(), cooldownMinutes)
+		}
+
+		// Cooldown has expired
+		logger.Infof("✅ [%s] %s cooldown expired (last loss %.0f min ago, cooldown=%d min)",
+			at.name, symbol, elapsed.Minutes(), cooldownMinutes)
+		return nil
+	}
+
+	// No previous trade found for this symbol — no restriction
+	return nil
+}
+
+// enforceVolatility checks if the market has enough volatility to trade (CODE ENFORCED)
+// Filters out sideways/ranging markets using ATR% = (ATR / CurrentPrice) * 100
+func (at *AutoTrader) enforceVolatility(symbol string, marketData map[string]*market.Data) error {
+	if at.config.StrategyConfig == nil {
+		return nil
+	}
+
+	minATRPercent := at.config.StrategyConfig.RiskControl.MinATRPercent
+	if minATRPercent <= 0 {
+		return nil // Volatility filter disabled
+	}
+
+	if marketData == nil {
+		return nil
+	}
+
+	mData, ok := marketData[symbol]
+	if !ok || mData == nil || mData.CurrentPrice <= 0 {
+		return nil // Cannot check without data
+	}
+
+	// Try to get ATR from Multi-timeframe data (prefer 15m or 1h for volatility check)
+	var atr float64 = 0
+	
+	if mData.TimeframeData != nil {
+		// Prefer 15m (3.5 hours moving average) for more sensitive volatility check, then fallback to 1h
+		if tfData, ok := mData.TimeframeData["15m"]; ok && tfData.ATR14 > 0 {
+			atr = tfData.ATR14
+		} else if tfData, ok := mData.TimeframeData["1h"]; ok && tfData.ATR14 > 0 {
+			atr = tfData.ATR14
+		}
+	}
+	
+	// Fallback to older data structures if TimeframeData is missing
+	if atr <= 0 && mData.IntradaySeries != nil && mData.IntradaySeries.ATR14 > 0 {
+		atr = mData.IntradaySeries.ATR14
+	}
+	if atr <= 0 && mData.LongerTermContext != nil && mData.LongerTermContext.ATR14 > 0 {
+		atr = mData.LongerTermContext.ATR14
+	}
+
+	if atr <= 0 {
+		return nil // Could not find ATR data, allow trade
+	}
+
+	// Calculate ATR percentage
+	currentATRPercent := (atr / mData.CurrentPrice) * 100
+
+	if currentATRPercent < minATRPercent {
+		logger.Infof("🛑 [RISK CONTROL] %s Sideways Filter: ATR %.2f%% is below minimum %.2f%%, blocking trade",
+			symbol, currentATRPercent, minATRPercent)
+		return fmt.Errorf("❌ [RISK CONTROL] %s market is too sideways/ranging (ATR %.2f%% < %.2f%%)",
+			symbol, currentATRPercent, minATRPercent)
+	}
+
+	logger.Infof("✅ [%s] %s passed volatility check (ATR %.2f%% > %.2f%%)",
+		at.name, symbol, currentATRPercent, minATRPercent)
 	return nil
 }
 

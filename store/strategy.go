@@ -227,6 +227,16 @@ type RiskControlConfig struct {
 	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
 	// Min AI confidence to open position (AI guided)
 	MinConfidence int `json:"min_confidence"`
+
+	// Cooldown period after a stop-loss on a specific symbol (CODE ENFORCED)
+	// If the last closed position for the symbol was a loss, block new entries for this many minutes
+	// 0 means no cooldown
+	CooldownMinutes int `json:"cooldown_minutes"`
+
+	// Minimum ATR percentage required to open a position (CODE ENFORCED)
+	// ATR% = (ATR / CurrentPrice) * 100. If ATR% < MinATRPercent, market is considered sideways
+	// 0 means no volatility filter
+	MinATRPercent float64 `json:"min_atr_percent"`
 }
 
 // NewStrategyStore creates a new StrategyStore
@@ -314,6 +324,8 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			MinPositionSize:              12,  // Min 12 USDT per position (CODE ENFORCED)
 			MinRiskRewardRatio:           3.0, // Min 3:1 profit/loss ratio (AI guided)
 			MinConfidence:                75,  // Min 75% confidence (AI guided)
+			CooldownMinutes:              0,   // No cooldown by default (0 = disabled, CODE ENFORCED)
+			MinATRPercent:                0.0, // No volatility filter by default (0 = disabled, CODE ENFORCED)
 		},
 	}
 
