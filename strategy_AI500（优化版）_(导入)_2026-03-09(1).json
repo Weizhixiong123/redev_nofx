@@ -1,0 +1,90 @@
+{
+  "name": "AI500（优化版） (导入)",
+  "description": "经过优化的中长线策略，降低杠杆，严格控制交易频率，增加明确的持仓管理规则，拒绝频繁短线交易。",
+  "config": {
+    "language": "zh",
+    "coin_source": {
+      "source_type": "ai500",
+      "use_ai500": true,
+      "ai500_limit": 10,
+      "use_oi_top": false,
+      "oi_top_limit": 10,
+      "use_oi_low": true,
+      "oi_low_limit": 5
+    },
+    "indicators": {
+      "klines": {
+        "primary_timeframe": "5m",
+        "primary_count": 30,
+        "longer_timeframe": "4h",
+        "longer_count": 10,
+        "enable_multi_timeframe": true,
+        "selected_timeframes": [
+          "5m",
+          "15m",
+          "1h",
+          "4h"
+        ]
+      },
+      "enable_raw_klines": true,
+      "enable_ema": false,
+      "enable_tema": true,
+      "enable_macd": false,
+      "enable_rsi": true,
+      "enable_atr": false,
+      "enable_boll": true,
+      "enable_volume": false,
+      "enable_oi": false,
+      "enable_funding_rate": false,
+      "ema_periods": [
+        20,
+        50
+      ],
+      "rsi_periods": [
+        7,
+        14
+      ],
+      "atr_periods": [
+        14
+      ],
+      "boll_periods": [
+        20
+      ],
+      "nofxos_api_key": "cm_568c67eae410d912c54c",
+      "enable_quant_data": true,
+      "enable_quant_oi": true,
+      "enable_quant_netflow": true,
+      "enable_oi_ranking": true,
+      "oi_ranking_duration": "1h",
+      "oi_ranking_limit": 10,
+      "enable_netflow_ranking": true,
+      "netflow_ranking_duration": "1h",
+      "netflow_ranking_limit": 10,
+      "enable_price_ranking": true,
+      "price_ranking_duration": "1h,4h,24h",
+      "price_ranking_limit": 10
+    },
+    "custom_prompt": "使用中文解释",
+    "risk_control": {
+      "max_positions": 1,
+      "btc_eth_max_leverage": 3,
+      "altcoin_max_leverage": 3,
+      "btc_eth_max_position_value_ratio": 5,
+      "altcoin_max_position_value_ratio": 1,
+      "max_margin_usage": 0.7,
+      "min_position_size": 12,
+      "min_risk_reward_ratio": 3,
+      "min_confidence": 80,
+      "cooldown_minutes": 60,
+      "min_atr_percent": 0
+    },
+    "prompt_sections": {
+      "role_definition": "# 你是一个专业的加密货币AI500优质资产配置员\n\n你的任务是根据提供的市场数据做出交易决策。你是一个经验丰富的量化交易员，擅长技术分析和风险管理。",
+      "trading_frequency": "# ⏱️ 交易频率控制（强制）\n\n- 开仓后最低持有时间：4小时\n- 除非触及止损价，否则4小时内不得平仓\n- 每日最多开仓2笔\n- 如果当前有2个以上持仓，禁止开新仓\n- 止盈目标：最低+8%，理想+15%~20%\n- 止损设置：-5%（考虑考虑杠杆后实际价格波动）",
+      "entry_standards": "# 🎯 入场标准（严格）\n\n1. 只交易AI500标签的优质资产\n2. 入场条件：多时间框架（15M+1H+4H）至少2个周期RSI在40-65之间，且TEMA方向一致向上\n3. 必须有资金面支撑：机构资金4h或24h为正流入\n4. 持仓量(OI)应为增加趋势\n\n## ⛔ 严格禁止\n- 追涨：4h涨幅超过10%的币不得做多\n- 接刀：4h跌幅超过5%的币不得做多\n- 每日开仓不超过2次，平仓不超过2次",
+      "decision_process": "# 📋 决策流程\n\n1. 检查持仓 → 是否止盈/止损\n2. 扫描候选币种 + 多时间框架 → 是否存在强信号\n3. 先写思维链，再输出结构化JSON\n\n# 📊 持仓管理规则（非常重要）\n\n1. 浮盈达到+3%时，必须将止损移至保本价（决不能让赢利的单子变成亏损）\n2. 浮盈达到+8%时，必须将止损移至+5%\n3. 浮盈达到+15%时，可以考虑止盈一半仓位，剩余继续持有\n4. 只有在趋势确认反转（1H RSI跌破35且TEMA方向转向下）或者触及追踪止损时才平仓\n5. \"hold\"是最常见的正确决策，拿到盈利目标需要时间，不要频繁早退"
+    }
+  },
+  "exported_at": "2026-03-09T07:40:31.494Z",
+  "version": "1.0"
+}
